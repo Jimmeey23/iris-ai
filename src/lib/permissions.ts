@@ -1,5 +1,20 @@
 import type { Ticket } from "@/db/schema";
 
+/** Access-control role from Supabase Auth + user_accounts (separate from job title). */
+export type AccessRole = "admin" | "manager" | "executive";
+
+export function canManageSettings(role: AccessRole | undefined): boolean {
+  return role === "admin";
+}
+
+export function canDeleteTickets(role: AccessRole | undefined): boolean {
+  return role === "admin";
+}
+
+export function canEditReviews(role: AccessRole | undefined): boolean {
+  return role === "admin";
+}
+
 /** Roles that can always act on any ticket regardless of assignment. */
 export const OVERRIDE_ROLES = [
   "Owner",

@@ -50,13 +50,9 @@ function ThemeToggle() {
 }
 
 function UserMenu() {
-  const { user, users, setUserId } = useUser();
+  const { user, signOut } = useUser();
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
   useEscape(open, () => setOpen(false));
-  const filtered = q
-    ? users.filter((u) => `${u.name} ${u.role} ${u.studio}`.toLowerCase().includes(q.toLowerCase()))
-    : users;
 
   return (
     <div className="relative">
@@ -65,40 +61,35 @@ function UserMenu() {
         className="inline-flex items-center gap-2 rounded-full py-1 pl-1 pr-3 transition"
         style={{ background: "var(--surface)", boxShadow: "inset 0 0 0 1px var(--line)" }}
       >
-        <Avatar name={user.name} color={user.color} size={24} />
+        <Avatar name={user.name || "?"} color={user.color} size={24} />
         <span className="hidden text-left leading-none sm:block">
-          <span className="block text-[11.5px] font-medium txt">{user.name.split(" ")[0]}</span>
-          <span className="mt-0.5 block text-[8.5px] uppercase tracking-[0.14em] txt-3">{user.studio}</span>
+          <span className="block text-[11.5px] font-medium txt">{(user.name || "Signing in…").split(" ")[0]}</span>
+          <span className="mt-0.5 block text-[8.5px] uppercase tracking-[0.14em] txt-3">{user.accessRole}</span>
         </span>
       </button>
       {open && (
         <>
           <button className="fixed inset-0 z-30" onClick={() => setOpen(false)} aria-label="close" />
           <div
-            className="animate-pop absolute right-0 top-full z-40 mt-2 w-[280px] rounded-2xl p-2"
+            className="animate-pop absolute right-0 top-full z-40 mt-2 w-[240px] rounded-2xl p-3"
             style={{ background: "var(--surface)", border: "1px solid var(--line)", boxShadow: "var(--shadow-lg)" }}
           >
-            <div className="mb-1.5 px-1 text-[9px] uppercase tracking-[0.2em] txt-3">Filing as</div>
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search team…" className="field !py-1.5 !text-[12px]" />
-            <div className="hide-scrollbar mt-1.5 max-h-[290px] overflow-y-auto">
-              {filtered.map((u) => (
-                <button
-                  key={u.id}
-                  onClick={() => {
-                    setUserId(u.id);
-                    setOpen(false);
-                  }}
-                  className="flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left transition hover:bg-[var(--surface-3)]"
-                  style={u.id === user.id ? { background: "var(--accent-soft)" } : undefined}
-                >
-                  <Avatar name={u.name} color={u.color} size={26} />
-                  <span className="min-w-0 leading-tight">
-                    <span className="block truncate text-[12px] font-medium txt">{u.name}</span>
-                    <span className="block truncate text-[10px] txt-3">{u.role}</span>
-                  </span>
-                </button>
-              ))}
+            <div className="flex items-center gap-2.5 px-1 pb-2">
+              <Avatar name={user.name || "?"} color={user.color} size={30} />
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate text-[12.5px] font-medium txt">{user.name}</span>
+                <span className="block truncate text-[10px] txt-3">{user.email}</span>
+              </span>
             </div>
+            <div className="mb-2 px-1 text-[9px] uppercase tracking-[0.2em] txt-3">
+              {user.accessRole} · {user.role || user.department}
+            </div>
+            <button
+              onClick={() => void signOut()}
+              className="btn btn-ghost w-full !justify-center"
+            >
+              Sign out
+            </button>
           </div>
         </>
       )}
@@ -108,6 +99,7 @@ function UserMenu() {
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const { user } = useUser();
   const [momence, setMomence] = useState<boolean | null>(null);
   const [mobile, setMobile] = useState(false);
   useEscape(mobile, () => setMobile(false));
@@ -154,9 +146,11 @@ export default function AppShell({ children }: { children: ReactNode }) {
         ))}
       </nav>
       <div className="flex flex-col items-center gap-2 border-t py-3 hairline">
-        <Link href="/settings" className="rail-btn !h-9 !w-9" data-active={active("/settings")} title="Settings">
-          <span className="rail-icon text-[13px]">⚙</span>
-        </Link>
+        {user.accessRole === "admin" && (
+          <Link href="/settings" className="rail-btn !h-9 !w-9" data-active={active("/settings")} title="Settings">
+            <span className="rail-icon text-[13px]">⚙</span>
+          </Link>
+        )}
       </div>
     </>
   );

@@ -1,7 +1,8 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { DEFAULT_USER, TEAM_USERS, type TeamUser } from "@/lib/users";
+import { colorFor } from "@/lib/org";
+import type { Role } from "@/lib/session";
 
 /* ---------------- theme ---------------- */
 
@@ -17,10 +18,44 @@ export function useTheme() {
 
 /* ---------------- user ---------------- */
 
-const UserContext = createContext<{ user: TeamUser; setUserId: (id: string) => void; users: TeamUser[] }>({
-  user: DEFAULT_USER,
-  setUserId: () => {},
-  users: TEAM_USERS,
+export type SessionTeamUser = {
+  id: string;
+  name: string;
+  role: string; // job title, e.g. "Ops Manager" — used for ticket-ownership overrides
+  studio: string;
+  initials: string;
+  color: string;
+  email: string;
+  accessRole: Role;
+  department: string;
+};
+
+const EMPTY_USER: SessionTeamUser = {
+  id: "",
+  name: "",
+  role: "",
+  studio: "",
+  initials: "",
+  color: "#6366f1",
+  email: "",
+  accessRole: "executive",
+  department: "",
+};
+
+function initials(name: string): string {
+  return name
+    .split(" ")
+    .map((p) => p[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+}
+
+const UserContext = createContext<{ user: SessionTeamUser; loading: boolean; signOut: () => Promise<void> }>({
+  user: EMPTY_USER,
+  loading: true,
+  signOut: async () => {},
 });
 
 export function useUser() {
@@ -29,7 +64,8 @@ export function useUser() {
 
 export function Providers({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>("light");
-  const [userId, setUserId] = useState<string>(DEFAULT_USER.id);
+  const [user, setUser] = useState<SessionTeamUser>(EMPTY_USER);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const storedTheme = window.localStorage.getItem("p57.theme") as Theme | null;
@@ -38,8 +74,32 @@ export function Providers({ children }: { children: ReactNode }) {
     setTheme(next);
     document.documentElement.classList.toggle("dark", next === "dark");
 
-    const storedUser = window.localStorage.getItem("p57.user");
-    if (storedUser && TEAM_USERS.some((u) => u.id === storedUser)) setUserId(storedUser);
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data?.user) return;
+        const u = data.user as {
+          id: string;
+          name: string;
+          email: string;
+          role: Role;
+          department: string;
+          jobTitle: string;
+          studio: string;
+        };
+        setUser({
+          id: u.id,
+          name: u.name,
+          role: u.jobTitle,
+          studio: u.studio,
+          initials: initials(u.name),
+          color: colorFor(u.id),
+          email: u.email,
+          accessRole: u.role,
+          department: u.department,
+        });
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const toggle = useCallback(() => {
@@ -53,17 +113,12 @@ export function Providers({ children }: { children: ReactNode }) {
 
   const themeValue = useMemo(() => ({ theme, toggle }), [theme, toggle]);
 
-  const userValue = useMemo(
-    () => ({
-      user: TEAM_USERS.find((u) => u.id === userId) ?? DEFAULT_USER,
-      setUserId: (id: string) => {
-        setUserId(id);
-        window.localStorage.setItem("p57.user", id);
-      },
-      users: TEAM_USERS,
-    }),
-    [userId],
-  );
+  const signOut = useCallback(async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }, []);
+
+  const userValue = useMemo(() => ({ user, loading, signOut }), [user, loading, signOut]);
 
   return (
     <ThemeContext.Provider value={themeValue}>

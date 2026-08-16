@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getSettings, maskSecret, setSetting } from "@/lib/settings";
 import { momenceStatus } from "@/lib/momence";
 import { ensureSeeded } from "@/lib/seed";
+import { getSessionUser } from "@/lib/session";
 import { ValidationError, parseBody, validationErrorResponse } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +39,11 @@ export async function GET() {
 const settingsBodySchema = z.record(z.string(), z.string());
 
 export async function POST(request: Request) {
+  const actor = await getSessionUser();
+  if (actor?.role !== "admin") {
+    return NextResponse.json({ error: "Only admins can change settings" }, { status: 403 });
+  }
+
   let body: Record<string, string>;
   try {
     body = await parseBody(request, settingsBodySchema);

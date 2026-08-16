@@ -185,6 +185,8 @@ export type TicketFilters = {
   assigneeId?: number;
   department?: string;
   limit?: number;
+  /** Row-level visibility scoping by the caller's access role. */
+  actor?: { name: string; role: "admin" | "manager" | "executive"; department?: string };
 };
 
 export async function listTickets(filters: TicketFilters = {}): Promise<Ticket[]> {
@@ -210,6 +212,19 @@ export async function listTickets(filters: TicketFilters = {}): Promise<Ticket[]
   if (filters.department && filters.department !== "all") conditions.push(eq(tickets.department, filters.department));
   if (filters.studioId) conditions.push(eq(tickets.studioId, filters.studioId));
   if (filters.assigneeId) conditions.push(eq(tickets.assigneeId, filters.assigneeId));
+
+  if (filters.actor && filters.actor.role !== "admin") {
+    const own = or(
+      ilike(tickets.reportedBy, filters.actor.name),
+      ilike(tickets.assigneeName, filters.actor.name),
+    );
+    if (filters.actor.role === "manager" && filters.actor.department) {
+      const deptClause = or(own, eq(tickets.department, filters.actor.department));
+      if (deptClause) conditions.push(deptClause);
+    } else if (own) {
+      conditions.push(own);
+    }
+  }
 
   const base = db.select().from(tickets);
   const query = conditions.length > 0 ? base.where(and(...conditions)) : base;

@@ -236,6 +236,19 @@ export const appSettings = pgTable("app_settings", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/** Links a Supabase Auth user to an access-control role and (optionally) a staff record. */
+export const userAccounts = pgTable("user_accounts", {
+  id: serial("id").primaryKey(),
+  authUserId: text("auth_user_id").notNull().unique(),
+  email: text("email").notNull().unique(),
+  name: text("name").notNull().default(""),
+  role: text("role").notNull().default("executive"), // "admin" | "manager" | "executive"
+  department: text("department").notNull().default(""),
+  staffId: integer("staff_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+
 export const whatsappTemplates = pgTable("whatsapp_templates", {
   id: serial("id").primaryKey(),
   templateId: text("template_id").notNull().unique(),
@@ -262,3 +275,4 @@ export type CustomTemplate = typeof customTemplates.$inferSelect;
 export type CustomFilloutForm = typeof customFilloutForms.$inferSelect;
 export type TrainerAnalysis = typeof trainerAnalysis.$inferSelect;
 export type WhatsappTemplate = typeof whatsappTemplates.$inferSelect;
+export type UserAccount = typeof userAccounts.$inferSelect;

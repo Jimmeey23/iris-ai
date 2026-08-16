@@ -4,6 +4,7 @@ import { ensureSeeded } from "@/lib/seed";
 import { createTicketFromDraft, listTickets } from "@/lib/tickets";
 import { aiEnrich } from "@/lib/enrich";
 import { CATEGORY_DEPARTMENT } from "@/lib/org";
+import { getSessionUser } from "@/lib/session";
 import { ValidationError, parseBody, validationErrorResponse } from "@/lib/validation";
 import type { TicketDraft } from "@/lib/types";
 
@@ -12,6 +13,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   await ensureSeeded();
   const { searchParams } = new URL(request.url);
+  const actor = await getSessionUser();
   const tickets = await listTickets({
     q: searchParams.get("q") ?? undefined,
     status: searchParams.get("status") ?? undefined,
@@ -20,6 +22,7 @@ export async function GET(request: Request) {
     department: searchParams.get("department") ?? undefined,
     studioId: searchParams.get("studioId") ? Number(searchParams.get("studioId")) : undefined,
     assigneeId: searchParams.get("assigneeId") ? Number(searchParams.get("assigneeId")) : undefined,
+    actor: actor ? { name: actor.name, role: actor.role, department: actor.department } : undefined,
   });
   return NextResponse.json({ tickets });
 }
