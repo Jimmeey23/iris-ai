@@ -230,12 +230,21 @@ type Analysis = {
   engine: string;
 };
 
+const PERIODS = [
+  { id: "30d", label: "30D", days: 30 },
+  { id: "90d", label: "90D", days: 90 },
+  { id: "180d", label: "6M", days: 180 },
+  { id: "365d", label: "1Y", days: 365 },
+  { id: "all", label: "All time", days: null },
+] as const;
+type PeriodId = (typeof PERIODS)[number]["id"];
+
 /* ------------------------------------------------------------------ */
 /* Report                                                              */
 /* ------------------------------------------------------------------ */
 
 export default function TrainerProfile({
-  trainer, evaluations, tickets, classes,
+  trainer, evaluations: allEvaluations, tickets: allTickets, classes: allClasses,
 }: {
   trainer: Trainer;
   evaluations: TrainerEvaluation[];
@@ -250,6 +259,36 @@ export default function TrainerProfile({
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [rubricFilter, setRubricFilter] = useState<"all" | "strong" | "focus">("all");
   const [rubricSearch, setRubricSearch] = useState("");
+  const [period, setPeriod] = useState<PeriodId>("all");
+  const [appliedPeriod, setAppliedPeriod] = useState<PeriodId>("all");
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+
+  const toggleExpanded = (id: number) =>
+    setExpandedIds((s) => {
+      const next = new Set(s);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  const cutoff = useMemo(() => {
+    const p = PERIODS.find((x) => x.id === appliedPeriod);
+    if (!p || p.days == null) return null;
+    return Date.now() - p.days * 86400000;
+  }, [appliedPeriod]);
+
+  /** Everything downstream reads from these — filtered by the applied reporting period. */
+  const evaluations = useMemo(
+    () => (cutoff ? allEvaluations.filter((e) => new Date(e.submittedAt).getTime() >= cutoff) : allEvaluations),
+    [allEvaluations, cutoff],
+  );
+  const tickets = useMemo(
+    () => (cutoff ? allTickets.filter((t) => new Date(t.createdAt).getTime() >= cutoff) : allTickets),
+    [allTickets, cutoff],
+  );
+  const classes = useMemo(
+    () => (cutoff ? allClasses.filter((c) => new Date(c.createdAt).getTime() >= cutoff) : allClasses),
+    [allClasses, cutoff],
+  );
 
   useEscape(exportOpen, () => setExportOpen(false));
 
@@ -301,6 +340,52 @@ export default function TrainerProfile({
         pct: v.weightage > 0 ? Math.round((v.score / v.weightage) * 100) : 0,
       }))
       .sort((a, b) => a.pct - b.pct);
+  }, [evaluations]);
+
+  const evaluatorBreakdown = useMemo(() => {
+    const map = new Map<string, { count: number; total: number }>();
+    for (const e of evaluations) {
+      const key = e.evaluator?.trim() || "Unattributed";
+      const cur = map.get(key) ?? { count: 0, total: 0 };
+      cur.count += 1;
+      cur.total += e.scorePercent;
+      map.set(key, cur);
+    }
+    return [...map.entries()]
+      .map(([evaluator, v]) => ({ evaluator, count: v.count, avg: Math.round(v.total / v.count) }))
+      .sort((a, b) => b.count - a.count);
+  }, [evaluations]);
+
+  const studioBreakdown = useMemo(() => {
+    const map = new Map<string, { count: number; total: number }>();
+    for (const e of evaluations) {
+      const key = e.studio?.trim() || "Unspecified";
+      const cur = map.get(key) ?? { count: 0, total: 0 };
+      cur.count += 1;
+      cur.total += e.scorePercent;
+      map.set(key, cur);
+    }
+    return [...map.entries()]
+      .map(([studio, v]) => ({ studio, count: v.count, avg: Math.round(v.total / v.count) }))
+      .sort((a, b) => b.count - a.count);
+  }, [evaluations]);
+
+  const themes = useMemo(() => {
+    const tally = (pick: (e: TrainerEvaluation) => string[]) => {
+      const map = new Map<string, number>();
+      for (const e of evaluations) {
+        for (const raw of pick(e) ?? []) {
+          const key = raw.trim();
+          if (!key) continue;
+          map.set(key, (map.get(key) ?? 0) + 1);
+        }
+      }
+      return [...map.entries()].map(([text, count]) => ({ text, count })).sort((a, b) => b.count - a.count).slice(0, 10);
+    };
+    return {
+      strengths: tally((e) => e.strengths ?? []),
+      improvements: tally((e) => e.improvements ?? []),
+    };
   }, [evaluations]);
 
   const selectedEval = useMemo(
@@ -358,33 +443,52 @@ export default function TrainerProfile({
   const stamp = new Date().toISOString().slice(0, 10);
   const slug = trainer.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
+  const periodLabel = PERIODS.find((p) => p.id === appliedPeriod)?.label ?? "All time";
+
   const reportHtml = useCallback(() => {
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const row = (k: string, v: string) => `<tr><td style="padding:6px 0;color:#5c6578;width:180px">${esc(k)}</td><td style="padding:6px 0;font-weight:500">${esc(v)}</td></tr>`;
+    const photo = trainer.pictureUrl
+      ? `<img src="${esc(trainer.pictureUrl)}" alt="${esc(trainer.name)}" style="width:128px;height:128px;border-radius:20px;object-fit:cover;box-shadow:0 8px 24px rgba(0,0,0,.12)"/>`
+      : `<div style="width:128px;height:128px;border-radius:20px;background:linear-gradient(140deg,#005eed,#0047c9);color:#fff;display:flex;align-items:center;justify-content:center;font-size:44px;font-family:'Instrument Serif',serif">${esc(trainer.name.split(" ").map((p) => p[0]).filter(Boolean).slice(0, 2).join("").toUpperCase())}</div>`;
     return `<!doctype html><html><head><meta charset="utf-8"/><title>${esc(trainer.name)} — performance report</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
  body{font-family:Outfit,system-ui,sans-serif;background:#fff;color:#0e1729;margin:0;padding:44px 24px}
- .wrap{max-width:820px;margin:0 auto}
- h1{font-family:'Instrument Serif',serif;font-weight:400;font-size:38px;margin:6px 0 2px}
- h2{font-family:'Instrument Serif',serif;font-weight:400;font-size:22px;margin:30px 0 10px;padding-bottom:6px;border-bottom:1px solid #efefef}
+ .wrap{max-width:860px;margin:0 auto}
+ h1{font-family:'Instrument Serif',serif;font-weight:400;font-size:40px;margin:0 0 2px}
+ h2{font-family:'Instrument Serif',serif;font-weight:400;font-size:22px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid #efefef}
+ h3{font-size:13px;font-weight:600;margin:0 0 4px;color:#0e1729}
+ .masthead{display:flex;align-items:center;gap:22px;padding-bottom:18px;border-bottom:2px solid #0e1729}
  .eyebrow{font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:#5c6578}
- .meta{font-size:12px;color:#5c6578;margin-bottom:6px}
+ .meta{font-size:12.5px;color:#5c6578;margin-top:6px}
  table{width:100%;border-collapse:collapse;font-size:13px}
  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}
- .tile{background:#efefef;border-radius:12px;padding:10px 12px}
+ .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+ .tile{background:#f4f5f7;border-radius:12px;padding:10px 12px}
  .tile b{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.14em;color:#5c6578;font-weight:600}
  .tile span{font-family:'Instrument Serif',serif;font-size:22px}
  .bar{height:6px;background:#efefef;border-radius:99px;overflow:hidden;margin:4px 0 10px}
  .bar i{display:block;height:100%;border-radius:99px;background:#005eed}
  ul{padding-left:18px;font-size:13px;color:#3c4557} li{margin:4px 0}
  .callout{background:rgba(0,94,237,.07);border-radius:14px;padding:14px 16px;font-size:13px;line-height:1.65;color:#3c4557}
+ .review{background:#fafafb;border:1px solid #efefef;border-radius:14px;padding:14px 16px;margin:10px 0}
+ .review-head{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:#5c6578}
+ .review-score{font-family:'Instrument Serif',serif;font-size:20px;color:#0e1729}
+ .qa{font-size:11.5px;color:#3c4557;margin:2px 0}
+ .qa b{color:#0e1729}
+ .num{text-align:right}
  footer{margin-top:36px;border-top:1px solid #efefef;padding-top:12px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#5c6578}
- @media print{body{padding:0}}
+ @media print{body{padding:0} .review{break-inside:avoid}}
 </style></head><body><div class="wrap">
-<div class="eyebrow">Instructor performance record</div>
-<h1>${esc(trainer.name)}</h1>
-<div class="meta">${esc(trainer.homeStudio || "Physique 57")} · ${esc(trainer.formats.join(", ") || "—")} · report generated ${stamp}</div>
+<div class="masthead">
+${photo}
+<div>
+ <div class="eyebrow">Instructor performance record · ${esc(periodLabel)}</div>
+ <h1>${esc(trainer.name)}</h1>
+ <div class="meta">${esc(trainer.homeStudio || "Physique 57")} · ${esc(trainer.formats.join(", ") || "—")} · report generated ${stamp}</div>
+</div>
+</div>
 <div class="grid">
  <div class="tile"><b>Average</b><span>${avg}%</span></div>
  <div class="tile"><b>Latest</b><span>${latest?.scorePercent ?? "—"}%</span></div>
@@ -397,15 +501,35 @@ ${analysis?.priorities.length ? `<h2>Coaching priorities</h2><ul>${analysis.prio
 ${analysis?.coachingPlan.length ? `<h2>Development plan</h2><table>${analysis.coachingPlan.map((p) => row(p.horizon, p.action)).join("")}</table>` : ""}
 <h2>Rubric attainment</h2>
 ${rubric.map((r) => `<div style="font-size:12px;display:flex;justify-content:space-between"><span>${esc(r.category)}</span><span>${r.score}/${r.weightage} · ${r.pct}%</span></div><div class="bar"><i style="width:${Math.max(2, r.pct)}%;background:${r.pct >= 80 ? "#067a4b" : r.pct >= 65 ? "#005eed" : "#d10202"}"></i></div>`).join("")}
-<h2>Assessment history</h2>
-<table><tr style="color:#5c6578;font-size:10px;text-transform:uppercase;letter-spacing:.12em"><td>Date</td><td>Score</td><td>Band</td><td>Format</td><td>Evaluator</td></tr>
-${evaluations.map((e) => `<tr><td style="padding:6px 0">${new Date(e.submittedAt).toLocaleDateString("en-IN")}</td><td style="font-weight:600">${e.scorePercent}%</td><td>${esc(e.band)}</td><td>${esc(e.template)}</td><td>${esc(e.evaluator || "—")}</td></tr>`).join("")}
+<h2>Evaluator &amp; studio breakdown</h2>
+<div class="grid2">
+<table><tr style="color:#5c6578;font-size:10px;text-transform:uppercase;letter-spacing:.12em"><td>Evaluator</td><td>Reviews</td><td>Avg</td></tr>
+${evaluatorBreakdown.map((e) => `<tr><td style="padding:5px 0">${esc(e.evaluator)}</td><td class="num">${e.count}</td><td class="num">${e.avg}%</td></tr>`).join("")}
 </table>
+<table><tr style="color:#5c6578;font-size:10px;text-transform:uppercase;letter-spacing:.12em"><td>Studio</td><td>Reviews</td><td>Avg</td></tr>
+${studioBreakdown.map((s) => `<tr><td style="padding:5px 0">${esc(s.studio)}</td><td class="num">${s.count}</td><td class="num">${s.avg}%</td></tr>`).join("")}
+</table>
+</div>
+<h2>Recurring feedback themes</h2>
+<div class="grid2">
+<div><h3>Strengths mentioned</h3><ul>${themes.strengths.length ? themes.strengths.map((t) => `<li>${esc(t.text)} <span style="color:#5c6578">(${t.count}×)</span></li>`).join("") : "<li>No recurring strengths yet.</li>"}</ul></div>
+<div><h3>Improvement areas mentioned</h3><ul>${themes.improvements.length ? themes.improvements.map((t) => `<li>${esc(t.text)} <span style="color:#5c6578">(${t.count}×)</span></li>`).join("") : "<li>No recurring improvement areas yet.</li>"}</ul></div>
+</div>
+<h2>Assessment history — full submission log (${evaluations.length})</h2>
+${[...evaluations].sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()).map((e) => `<div class="review">
+<div class="review-head"><span class="review-score">${e.scorePercent}%</span><span>${esc(e.band)}</span><span>·</span><span>${esc(e.template)}</span>${e.studio ? `<span>·</span><span>${esc(e.studio)}</span>` : ""}<span>·</span><span>${new Date(e.submittedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>${e.evaluator ? `<span>·</span><span>by ${esc(e.evaluator)}</span>` : ""}</div>
+${e.focusPoints ? `<p class="qa"><b>Focus points:</b> ${esc(e.focusPoints)}</p>` : ""}
+${e.goals ? `<p class="qa"><b>Goals:</b> ${esc(e.goals)}</p>` : ""}
+${e.comments ? `<p class="qa"><b>Comments:</b> ${esc(e.comments)}</p>` : ""}
+${e.strengths?.length ? `<p class="qa"><b>Strengths:</b> ${e.strengths.map(esc).join("; ")}</p>` : ""}
+${e.improvements?.length ? `<p class="qa"><b>Improvements:</b> ${e.improvements.map(esc).join("; ")}</p>` : ""}
+${(e.answers ?? []).map((a) => `<p class="qa"><b>${esc(a.label)}:</b> ${esc(a.value)}</p>`).join("")}
+</div>`).join("")}
 <h2>Member feedback</h2>
 <table>${row("Positive mentions", String(positives))}${row("Negative or escalated", String(negatives))}${row("Open tickets", String(openIssues.length))}${row("Hosted classes", String(classes.length))}</table>
 <footer>Physique 57 — IRIS Ai · confidential instructor record</footer>
 </div></body></html>`;
-  }, [trainer, avg, latest, evaluations, delta, analysis, rubric, positives, negatives, openIssues.length, classes.length, stamp]);
+  }, [trainer, avg, latest, evaluations, delta, analysis, rubric, evaluatorBreakdown, studioBreakdown, themes, positives, negatives, openIssues.length, classes.length, stamp, periodLabel]);
 
   const doExport = async (kind: "pdf" | "png" | "html" | "json" | "print") => {
     setExportOpen(false);
@@ -452,7 +576,24 @@ ${evaluations.map((e) => `<tr><td style="padding:6px 0">${new Date(e.submittedAt
       <div className="flex flex-wrap items-center gap-2">
         <span className="chip chip-line">Report generated {stamp}</span>
         {analysis && <span className="chip" style={{ background: riskChip.bg, color: riskChip.c }}>{riskChip.label}</span>}
-        <div className="relative ml-auto">
+        <span className="chip accent-soft">Showing: {periodLabel}</span>
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="seg">
+            {PERIODS.map((p) => (
+              <button key={p.id} data-active={period === p.id} onClick={() => setPeriod(p.id)}>{p.label}</button>
+            ))}
+          </div>
+          <button
+            onClick={() => setAppliedPeriod(period)}
+            disabled={period === appliedPeriod}
+            className="btn btn-solid !py-1.5 disabled:opacity-40"
+          >
+            Generate report
+          </button>
+        </div>
+
+        <div className="relative">
           <button onClick={() => setExportOpen((o) => !o)} className="btn btn-primary" disabled={!!exporting}>
             {exporting ? "Exporting…" : "Export report"}
           </button>
@@ -478,26 +619,27 @@ ${evaluations.map((e) => `<tr><td style="padding:6px 0">${new Date(e.submittedAt
       <div ref={reportRef} className="space-y-4">
         {/* masthead */}
         <div className="panel overflow-hidden rounded-3xl">
-          <div className="h-[3px] w-full grad-accent" />
-          <div className="flex flex-wrap items-center gap-5 px-6 py-5">
+          <div className="h-[4px] w-full grad-accent" />
+          <div className="flex flex-wrap items-center gap-6 px-7 py-7" style={{ background: "linear-gradient(135deg, var(--surface-2), var(--surface))" }}>
             {trainer.pictureUrl ? (
               /* eslint-disable-next-line @next/next/no-img-element */
-              <img src={trainer.pictureUrl} alt={trainer.name} className="h-[76px] w-[76px] rounded-2xl object-cover"
-                style={{ boxShadow: "inset 0 0 0 1px var(--line), var(--shadow-sm)" }} />
+              <img src={trainer.pictureUrl} alt={trainer.name} className="h-[152px] w-[152px] shrink-0 rounded-[28px] object-cover"
+                style={{ boxShadow: "inset 0 0 0 1px var(--line), var(--shadow-lg)" }} />
             ) : (
-              <Avatar name={trainer.name} size={76} />
+              <Avatar name={trainer.name} size={152} />
             )}
             <div className="min-w-0 flex-1">
-              <div className="text-[9px] font-semibold uppercase tracking-[0.24em] txt-3">Instructor performance record</div>
-              <h1 className="serif mt-1.5 text-[34px] leading-none txt">{trainer.name}</h1>
-              <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+              <div className="text-[9.5px] font-semibold uppercase tracking-[0.28em] txt-3">Instructor performance record</div>
+              <h1 className="serif mt-2 text-[46px] leading-none txt">{trainer.name}</h1>
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
                 {trainer.homeStudio && <span className="chip chip-line">{trainer.homeStudio}</span>}
                 {trainer.formats.map((f) => <span key={f} className="chip accent-soft">{f}</span>)}
                 {latest && <span className={`chip ${bandTone(latest.band)}`}>{latest.band}</span>}
                 {trainer.momenceTeacherId && <span className="chip chip-line">Momence #{trainer.momenceTeacherId}</span>}
+                {trainer.email && <span className="chip chip-line">{trainer.email}</span>}
               </div>
             </div>
-            <ScoreDial value={avg} />
+            <ScoreDial value={avg} size={112} />
           </div>
         </div>
 
@@ -687,45 +829,165 @@ ${evaluations.map((e) => `<tr><td style="padding:6px 0">${new Date(e.submittedAt
           </div>
         </Section>
 
-        {/* 06 — assessment history */}
-        <Section index="06" title="Assessment history" subtitle="Click any assessment to load it into the rubric &amp; radar above">
+        {/* 06 — assessment history, full submission detail for every historic review */}
+        <Section index="06" title="Assessment history" subtitle="Every historic review on file for the selected period · click the score to load it into the rubric &amp; radar above"
+          action={<span className="chip chip-line">{evaluations.length} on file</span>}>
           {evaluations.length === 0 ? (
             <EmptyState icon="◔" title="No evaluations" body="Fillout submissions appear here automatically." />
           ) : (
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               {[...evaluations].sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()).map((e) => {
                 const active = e.id === selectedEval?.id;
+                const open = expandedIds.has(e.id);
                 return (
-                  <button
+                  <div
                     key={e.id}
-                    onClick={() => setSelectedId(e.id)}
-                    className="row-reveal block w-full rounded-2xl p-3.5 text-left transition"
+                    className="row-reveal rounded-2xl p-3.5 transition"
                     style={{
                       background: active ? "var(--accent-soft)" : "var(--surface-3)",
                       boxShadow: active ? "inset 0 0 0 1px var(--accent-line)" : undefined,
                     }}
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="serif text-[19px] leading-none tabular" style={{ color: active ? "var(--accent)" : "var(--text)" }}>{e.scorePercent}%</span>
+                      <button onClick={() => setSelectedId(e.id)} className="serif text-[19px] leading-none tabular" style={{ color: active ? "var(--accent)" : "var(--text)" }}>
+                        {e.scorePercent}%
+                      </button>
                       <span className={`chip ${bandTone(e.band)}`}>{e.band}</span>
                       <span className="chip chip-line">{e.template}</span>
                       {e.studio && <span className="chip chip-line">{e.studio}</span>}
                       {active && <span className="chip" style={{ background: "var(--accent)", color: "#fff" }}>Active in report</span>}
                       <span className="ml-auto text-[10px] txt-3" suppressHydrationWarning>
-                        {timeAgo(e.submittedAt)} ago{e.evaluator ? ` · ${e.evaluator}` : ""}
+                        {new Date(e.submittedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                        {e.evaluator ? ` · ${e.evaluator}` : ""} · {timeAgo(e.submittedAt)} ago
                       </span>
                     </div>
-                    {e.focusPoints && <p className="mt-2 text-[12px] txt-2"><strong className="txt">Focus:</strong> {e.focusPoints}</p>}
-                    {e.comments && <p className="mt-1 text-[12px] leading-relaxed txt-2">{e.comments}</p>}
-                  </button>
+
+                    <div className="mt-2.5 grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+                      {e.focusPoints && <p className="text-[12px] leading-relaxed txt-2"><strong className="txt">Focus:</strong> {e.focusPoints}</p>}
+                      {e.goals && <p className="text-[12px] leading-relaxed txt-2"><strong className="txt">Goals:</strong> {e.goals}</p>}
+                      {e.comments && <p className="text-[12px] leading-relaxed txt-2 sm:col-span-2"><strong className="txt">Comments:</strong> {e.comments}</p>}
+                    </div>
+
+                    {(e.strengths?.length > 0 || e.improvements?.length > 0) && (
+                      <div className="mt-2.5 flex flex-wrap gap-1.5">
+                        {e.strengths?.map((s, i) => (
+                          <span key={`s${i}`} className="chip" style={{ background: "var(--mint-soft)", color: "var(--mint)" }}>{s}</span>
+                        ))}
+                        {e.improvements?.map((s, i) => (
+                          <span key={`i${i}`} className="chip" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{s}</span>
+                        ))}
+                      </div>
+                    )}
+
+                    {e.scores?.length > 0 && (
+                      <div className="mt-2.5 grid gap-1.5 sm:grid-cols-2">
+                        {e.scores.map((s) => (
+                          <div key={s.category} className="flex items-center justify-between rounded-lg px-2.5 py-1 text-[11px]" style={{ background: "var(--surface)" }}>
+                            <span className="truncate txt-2">{s.category}</span>
+                            <span className="tabular txt-3">{s.score}/{s.weightage}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {(e.answers?.length ?? 0) > 0 && (
+                      <>
+                        <button onClick={() => toggleExpanded(e.id)} className="mt-2.5 text-[11px] font-semibold accent-txt">
+                          {open ? "Hide full submission ▴" : `Show full submission — all ${e.answers.length} questions ▾`}
+                        </button>
+                        {open && (
+                          <div className="mt-2 grid gap-1.5 rounded-xl p-3 sm:grid-cols-2" style={{ background: "var(--surface)" }}>
+                            {e.answers.map((a, i) => (
+                              <div key={i} className="min-w-0">
+                                <div className="text-[9.5px] font-semibold uppercase tracking-[0.1em] txt-3">{a.label}</div>
+                                <div className="text-[11.5px] leading-snug txt-2">{a.value || "—"}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
                 );
               })}
             </div>
           )}
         </Section>
 
-        {/* 07 — tickets */}
-        <Section index="07" title="Feedback tickets" subtitle={`${tickets.length} logged`} >
+        {/* 07 — evaluator & studio breakdown */}
+        <Section index="07" title="Evaluator &amp; studio breakdown" subtitle="Who is assessing this trainer, and where">
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <div className="mb-2 text-[8.5px] font-semibold uppercase tracking-[0.16em] txt-3">By evaluator</div>
+              {evaluatorBreakdown.length === 0 ? (
+                <p className="text-[11.5px] txt-3">No evaluations recorded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {evaluatorBreakdown.map((r) => (
+                    <div key={r.evaluator} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface-3)" }}>
+                      <span className="truncate text-[12px] txt-2">{r.evaluator}</span>
+                      <span className="shrink-0 text-[11px] txt-3">{r.count} review{r.count === 1 ? "" : "s"} · <strong className="txt">{r.avg}%</strong> avg</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <div className="mb-2 text-[8.5px] font-semibold uppercase tracking-[0.16em] txt-3">By studio</div>
+              {studioBreakdown.length === 0 ? (
+                <p className="text-[11.5px] txt-3">No studio recorded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {studioBreakdown.map((r) => (
+                    <div key={r.studio} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: "var(--surface-3)" }}>
+                      <span className="truncate text-[12px] txt-2">{r.studio}</span>
+                      <span className="shrink-0 text-[11px] txt-3">{r.count} review{r.count === 1 ? "" : "s"} · <strong className="txt">{r.avg}%</strong> avg</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Section>
+
+        {/* 08 — recurring feedback themes */}
+        <Section index="08" title="Recurring feedback themes" subtitle="Phrases repeated across historic reviews, most frequent first">
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <div className="mb-2 text-[8.5px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--mint)" }}>Strengths mentioned</div>
+              {themes.strengths.length === 0 ? (
+                <p className="text-[11.5px] txt-3">No recurring strengths yet.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {themes.strengths.map((t) => (
+                    <li key={t.text} className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed txt-2" style={{ background: "var(--surface-3)" }}>
+                      <span className="min-w-0 truncate">{t.text}</span>
+                      <span className="shrink-0 text-[10.5px] txt-3">{t.count}×</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <div className="mb-2 text-[8.5px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--danger)" }}>Improvement areas mentioned</div>
+              {themes.improvements.length === 0 ? (
+                <p className="text-[11.5px] txt-3">No recurring improvement areas yet.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {themes.improvements.map((t) => (
+                    <li key={t.text} className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed txt-2" style={{ background: "var(--surface-3)" }}>
+                      <span className="min-w-0 truncate">{t.text}</span>
+                      <span className="shrink-0 text-[10.5px] txt-3">{t.count}×</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </Section>
+
+        {/* 09 — tickets */}
+        <Section index="09" title="Feedback tickets" subtitle={`${tickets.length} logged`} >
           {tickets.length === 0 ? (
             <EmptyState icon="≡" title="No feedback tickets" body="Nothing has been logged against this trainer." />
           ) : (
@@ -747,8 +1009,8 @@ ${evaluations.map((e) => `<tr><td style="padding:6px 0">${new Date(e.submittedAt
           )}
         </Section>
 
-        {/* 08 — hosted classes */}
-        <Section index="08" title="Hosted classes" subtitle={`${classes.length} sessions`}>
+        {/* 10 — hosted classes */}
+        <Section index="10" title="Hosted classes" subtitle={`${classes.length} sessions`}>
           {classes.length === 0 ? (
             <EmptyState icon="◷" title="No hosted classes" body="Hosted class feedback will appear here." />
           ) : (

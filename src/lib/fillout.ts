@@ -1,3 +1,6 @@
+import { asc, eq } from "drizzle-orm";
+import { db } from "@/db";
+import { customFilloutForms } from "@/db/schema";
 import { getSetting } from "./settings";
 import { RUBRICS, performanceBand, summariseScores, type ScoreRow } from "./trainer-eval";
 import type { TrainerTemplate } from "./catalog";
@@ -72,6 +75,46 @@ export const FILLOUT_FORMS: FilloutForm[] = [
 
 export function formByEmbedId(id: string): FilloutForm | undefined {
   return FILLOUT_FORMS.find((f) => f.embedId === id);
+}
+
+/** The four built-in forms plus any active user-added forms, as one list for the /forms board. */
+export async function getAllForms(): Promise<FilloutForm[]> {
+  const custom = await db
+    .select()
+    .from(customFilloutForms)
+    .where(eq(customFilloutForms.active, true))
+    .orderBy(asc(customFilloutForms.name));
+  return [
+    ...FILLOUT_FORMS,
+    ...custom.map((c) => ({
+      key: c.slug,
+      name: c.name,
+      blurb: c.blurb,
+      template: c.template as TrainerTemplate,
+      embedId: c.embedId,
+      embedKind: c.embedKind as EmbedKind,
+      height: c.height,
+      icon: c.icon,
+      apiPollable: false,
+    })),
+  ];
+}
+
+/**
+ * Pulls the embed id + kind out of whatever a user pastes: a full Fillout/Zite
+ * embed snippet, or a bare form id (assumed Fillout v1).
+ */
+export function extractEmbed(input: string): { embedId: string; embedKind: EmbedKind } | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const ziteMatch = raw.match(/data-zite-id=["']([a-zA-Z0-9]+)["']/);
+  if (ziteMatch) return { embedId: ziteMatch[1], embedKind: "zite-v2" };
+  const filloutMatch = raw.match(/data-fillout-id=["']([a-zA-Z0-9]+)["']/);
+  if (filloutMatch) return { embedId: filloutMatch[1], embedKind: "fillout-v1" };
+  const urlMatch = raw.match(/fillout\.com\/(?:t|p)\/([a-zA-Z0-9]+)/);
+  if (urlMatch) return { embedId: urlMatch[1], embedKind: "fillout-v1" };
+  if (/^[a-zA-Z0-9]+$/.test(raw)) return { embedId: raw, embedKind: "fillout-v1" };
+  return null;
 }
 
 /* ------------------------------------------------------------------ */

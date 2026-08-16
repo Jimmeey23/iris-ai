@@ -22,6 +22,13 @@
       "when": 1786820827588,
       "tag": "0002_harsh_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786853618031,
+      "tag": "0003_clear_colossus",
+      "breakpoints": true
     }
   ]
 }

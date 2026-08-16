@@ -201,6 +201,20 @@ export const customTemplates = pgTable("custom_templates", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const customFilloutForms = pgTable("custom_fillout_forms", {
+  id: serial("id").primaryKey(),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  blurb: text("blurb").notNull().default(""),
+  template: text("template").notNull().default("General"),
+  embedId: text("embed_id").notNull(),
+  embedKind: text("embed_kind").notNull().default("fillout-v1"),
+  height: integer("height").notNull().default(500),
+  icon: text("icon").notNull().default("▤"),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const trainerAnalysis = pgTable("trainer_analysis", {
   trainerId: integer("trainer_id").primaryKey(),
   headline: text("headline").notNull().default(""),
@@ -245,5 +259,6 @@ export type Trainer = typeof trainers.$inferSelect;
 export type TrainerEvaluation = typeof trainerEvaluations.$inferSelect;
 export type ClassFeedback = typeof classFeedback.$inferSelect;
 export type CustomTemplate = typeof customTemplates.$inferSelect;
+export type CustomFilloutForm = typeof customFilloutForms.$inferSelect;
 export type TrainerAnalysis = typeof trainerAnalysis.$inferSelect;
 export type WhatsappTemplate = typeof whatsappTemplates.$inferSelect;
