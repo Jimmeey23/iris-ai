@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createSupabaseMiddlewareClient } from "@/lib/supabase/middleware";
 
-const PUBLIC_PATHS = ["/login", "/api/auth", "/api/health", "/api/fillout"];
+const PUBLIC_PATHS = ["/login", "/auth/callback", "/api/auth", "/api/health", "/api/fillout"];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
