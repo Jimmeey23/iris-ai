@@ -8,7 +8,9 @@ import {
   fetchSubmissions,
   filloutConfigured,
   formByEmbedId,
+  isZitePayload,
   mapSubmission,
+  mapZiteAssessment,
   normaliseWebhook,
   type MappedSubmission,
 } from "@/lib/fillout";
@@ -149,44 +151,49 @@ export async function POST(request: Request) {
   }
 
   try {
-    const norm = normaliseWebhook(payload);
     let mapped: MappedSubmission;
 
-    if (norm && norm.submission.questions.length > 0) {
-      const form =
-        formByEmbedId(norm.formId) ??
-        FILLOUT_FORMS.find((f) => f.embedId === norm.formId) ?? {
-          embedId: norm.formId || "webhook",
-          template: "General" as const,
-          name: "Webhook submission",
-        };
-      mapped = mapSubmission(norm.submission, form, "fillout-webhook");
+    if (isZitePayload(payload)) {
+      mapped = mapZiteAssessment(payload);
     } else {
-      // Legacy / unknown body shape — fall back to the generic mapper.
-      const legacy = mapFilloutSubmission(payload);
-      mapped = {
-        sourceRef: legacy.sourceRef,
-        submissionId: legacy.submissionId,
-        formId: legacy.formId,
-        formName: "Webhook submission",
-        trainer: legacy.trainer,
-        template: legacy.template,
-        studio: legacy.studio,
-        classType: legacy.classType,
-        evaluator: legacy.evaluator,
-        classAt: "",
-        scorePercent: legacy.scorePercent,
-        band: legacy.band,
-        scores: legacy.scores,
-        strengths: legacy.strengths,
-        improvements: legacy.improvements,
-        focusPoints: legacy.focusPoints,
-        goals: legacy.goals,
-        comments: legacy.comments,
-        answers: legacy.answers,
-        submittedAt: legacy.submittedAt,
-        source: "fillout-webhook",
-      };
+      const norm = normaliseWebhook(payload);
+
+      if (norm && norm.submission.questions.length > 0) {
+        const form =
+          formByEmbedId(norm.formId) ??
+          FILLOUT_FORMS.find((f) => f.embedId === norm.formId) ?? {
+            embedId: norm.formId || "webhook",
+            template: "General" as const,
+            name: "Webhook submission",
+          };
+        mapped = mapSubmission(norm.submission, form, "fillout-webhook");
+      } else {
+        // Legacy / unknown body shape — fall back to the generic mapper.
+        const legacy = mapFilloutSubmission(payload);
+        mapped = {
+          sourceRef: legacy.sourceRef,
+          submissionId: legacy.submissionId,
+          formId: legacy.formId,
+          formName: "Webhook submission",
+          trainer: legacy.trainer,
+          template: legacy.template,
+          studio: legacy.studio,
+          classType: legacy.classType,
+          evaluator: legacy.evaluator,
+          classAt: "",
+          scorePercent: legacy.scorePercent,
+          band: legacy.band,
+          scores: legacy.scores,
+          strengths: legacy.strengths,
+          improvements: legacy.improvements,
+          focusPoints: legacy.focusPoints,
+          goals: legacy.goals,
+          comments: legacy.comments,
+          answers: legacy.answers,
+          submittedAt: legacy.submittedAt,
+          source: "fillout-webhook",
+        };
+      }
     }
 
     const res = await persist(mapped);

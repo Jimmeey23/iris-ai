@@ -195,8 +195,14 @@ export function mapFilloutSubmission(payload: unknown): FilloutMapping {
   );
   const formId = String(root.formId ?? submission.formId ?? "training-evaluation");
 
+  const urlParams = ((root.urlParameters ?? submission.urlParameters) as { name?: string; value?: string }[] | undefined) ?? [];
   const trainer =
-    find(answers, [/trainer/i, /instructor/i, /coach/i, /teacher/i, /name of/i]) || "Unknown trainer";
+    find(answers, [/trainer/i, /instructor/i, /coach/i, /teacher/i, /name of/i, /faculty/i, /taught by/i]) ||
+    find(
+      urlParams.map((p) => ({ label: p.name ?? "", value: p.value ?? "" })),
+      [/trainer/i, /instructor/i, /faculty/i],
+    ) ||
+    "Unknown trainer";
   const rawTemplate = find(answers, [/template/i, /format/i, /programme|program/i, /class type/i]);
   const template: TrainerTemplate = /cycle/i.test(rawTemplate)
     ? "powerCycle"

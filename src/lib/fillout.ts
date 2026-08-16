@@ -216,6 +216,16 @@ function findQ(questions: ApiQuestion[], patterns: RegExp[]): string {
   return "";
 }
 
+/** Fillout echoes prefilled/hidden fields (e.g. ?instructor=Anisha+Shah) here, not in `questions`. */
+function findParam(params: { name: string; value: string }[] | undefined, patterns: RegExp[]): string {
+  if (!params) return "";
+  for (const re of patterns) {
+    const hit = params.find((p) => re.test(p.name) && p.value?.trim());
+    if (hit) return hit.value.trim();
+  }
+  return "";
+}
+
 function templateFromLevel(level: string, fallback: TrainerTemplate): TrainerTemplate {
   const l = level.toLowerCase();
   if (/cycle/.test(l)) return "powerCycle";
@@ -343,7 +353,10 @@ export function mapSubmission(
     submissionId: submission.submissionId,
     formId: form.embedId,
     formName: form.name,
-    trainer: findQ(questions, [/^trainer name/i, /^trainer$/i, /instructor/i]) || "Unknown trainer",
+    trainer:
+      findQ(questions, [/^trainer name/i, /^trainer$/i, /instructor/i, /faculty/i, /taught by/i, /staff name/i]) ||
+      findParam(submission.urlParameters, [/trainer/i, /instructor/i, /faculty/i]) ||
+      "Unknown trainer",
     template,
     studio: findQ(questions, [/^center$/i, /^centre$/i, /studio|location/i]),
     classType: level || template,
@@ -362,6 +375,77 @@ export function mapSubmission(
     answers,
     submittedAt: submission.submissionTime ?? new Date().toISOString(),
     source,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Zite (Strength Lab / powerCycle) custom webhook payload              */
+/* ------------------------------------------------------------------ */
+
+const ZITE_CRITERIA = [
+  { key: "scorePreClass", category: "Pre Class Setup", weightage: 5 },
+  { key: "scoreClientConnection", category: "Client Connection", weightage: 20 },
+  { key: "scoreUspIntegration", category: "USP Integration", weightage: 10 },
+  { key: "scoreMapping", category: "Mapping & Learning Styles", weightage: 10 },
+  { key: "scoreMusicalArc", category: "Musical Arc", weightage: 15 },
+  { key: "scoreCoachingDelivery", category: "Coaching Delivery", weightage: 15 },
+  { key: "scoreMotivation", category: "Motivation", weightage: 15 },
+  { key: "scoreTimeManagement", category: "Time Management", weightage: 5 },
+  { key: "scorePostClass", category: "Post Class", weightage: 5 },
+] as const;
+
+/** Zite posts a bespoke flat schema (trainerName, scorePreClass, ...), not Fillout's question format. */
+export function isZitePayload(payload: unknown): payload is Record<string, unknown> {
+  const p = payload as Record<string, unknown> | null;
+  return !!p && typeof p.trainerName === "string" && typeof p.scorePreClass === "number";
+}
+
+export function mapZiteAssessment(payload: Record<string, unknown>): MappedSubmission {
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+  const scores: ScoreRow[] = ZITE_CRITERIA.map((c) => ({
+    category: c.category,
+    weightage: c.weightage,
+    score: num(payload[c.key]),
+  }));
+  const summary = summariseScores(scores);
+  const scorePercent = typeof payload.totalScore === "number" ? Math.round(payload.totalScore) : summary.scorePercent;
+  const sessionName = str(payload.sessionName);
+  const template: TrainerTemplate = /cycle/i.test(sessionName) ? "powerCycle" : "Strength Lab";
+  const recordId = str(payload.ziteRecordId) || `zite-${Date.now()}`;
+  const strengths = str(payload.keyStrengths);
+  const improvements = str(payload.areasForImprovement);
+  const reportUrl = str(payload.reportUrl);
+
+  return {
+    sourceRef: `zite:${recordId}`,
+    submissionId: recordId,
+    formId: "zite-assessment",
+    formName: "Zite trainer assessment",
+    trainer: str(payload.trainerName).trim() || "Unknown trainer",
+    template,
+    studio: str(payload.location),
+    classType: sessionName || template,
+    evaluator: str(payload.evaluatorName),
+    classAt: str(payload.formattedDate) || str(payload.classDate),
+    scorePercent,
+    band: performanceBand(scorePercent),
+    scores,
+    strengths: strengths ? strengths.split(/\.\s+|\n/).filter(Boolean).slice(0, 5) : summary.strengths,
+    improvements: improvements ? improvements.split(/\.\s+|\n/).filter(Boolean).slice(0, 5) : summary.improvements,
+    focusPoints: str(payload.coachingActionPlan),
+    goals: str(payload.coachingActionPlan),
+    comments: reportUrl ? `Full report: ${reportUrl}` : "",
+    answers: Object.entries(payload)
+      .filter(([, v]) => typeof v === "string" || typeof v === "number")
+      .map(([k, v]) => ({ label: k, value: String(v) })),
+    submittedAt: (() => {
+      const d = str(payload.classDate);
+      const parsed = d ? new Date(d) : null;
+      return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
+    })(),
+    source: "zite-webhook",
   };
 }
 
