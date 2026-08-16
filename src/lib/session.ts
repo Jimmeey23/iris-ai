@@ -1,9 +1,33 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { userAccounts, staff } from "@/db/schema";
 import { createSupabaseServerClient } from "./supabase/server";
 
 export type Role = "admin" | "manager" | "executive";
+
+const ADMIN_EMAILS = new Set([
+  "jimmeey@physique57india.com",
+  "saachi@physique57india.com",
+  "mitali@physique57india.com",
+  "mrigakshi@physique57mumbai.com",
+  "vivaran@physique57mumbai.com",
+  "pushyank@physique57bengaluru.com",
+  "shifa@physique57bengaluru.com",
+]);
+
+const MANAGER_EMAILS = new Set([
+  "zahur@physique57mumbai.com",
+  "atulan@physique57mumbai.com",
+  "akshay@physique57mumbai.com",
+  "shipra@physique57mumbai.com",
+]);
+
+function roleForEmail(email: string): Role {
+  const normalized = email.toLowerCase();
+  if (ADMIN_EMAILS.has(normalized)) return "admin";
+  if (MANAGER_EMAILS.has(normalized)) return "manager";
+  return "executive";
+}
 
 export type SessionUser = {
   id: string;
@@ -44,8 +68,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
 
   // First-time login: match against the staff directory for name/department, provision the account.
   const [match] = await db.select().from(staff).where(eq(staff.email, user.email)).limit(1);
-  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(userAccounts);
-  const role: Role = count === 0 ? "admin" : "executive"; // first account bootstraps as admin
+  const role = roleForEmail(user.email);
 
   const [created] = await db
     .insert(userAccounts)
