@@ -5,6 +5,7 @@ import type { Ticket, Staff, Studio, Department } from "@/db/schema";
 import { SLA_HOURS, type Priority } from "./taxonomy";
 import { CATEGORY_DEPARTMENT, CATEGORY_ROLE_PREFERENCE } from "./org";
 import type { TicketDraft } from "./types";
+import { notifyAssignee } from "./notify";
 
 export const OPEN_STATUSES = ["Open", "In Progress", "Awaiting Info"];
 
@@ -172,6 +173,8 @@ export async function createTicketFromDraft(
       createdAt: new Date(createdAt.getTime() + 60),
     },
   ]);
+
+  if (assignee) await notifyAssignee(ticket, "assigned");
 
   return ticket;
 }
@@ -429,5 +432,10 @@ export async function updateTicket(
 
   const [updated] = await db.update(tickets).set(updates).where(eq(tickets.id, id)).returning();
   for (const note of notes) await addEvent(id, note.type, actor, note.message);
+
+  const reassigned =
+    patch.assigneeId !== undefined && patch.assigneeId !== null && patch.assigneeId !== current.assigneeId;
+  if (reassigned && updated) await notifyAssignee(updated, "reassigned");
+
   return updated;
 }

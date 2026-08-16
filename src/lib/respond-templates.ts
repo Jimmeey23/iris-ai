@@ -97,6 +97,11 @@ export async function getSyncedTemplate(templateId: string): Promise<WhatsappTem
   return row ?? null;
 }
 
+export async function getSyncedTemplateByName(name: string): Promise<WhatsappTemplate | null> {
+  const [row] = await db.select().from(whatsappTemplates).where(eq(whatsappTemplates.name, name)).limit(1);
+  return row ?? null;
+}
+
 export type SendTemplateResult = { ok: boolean; messageId?: number; detail?: string };
 
 /** Send a synced WhatsApp template message to a contact, filling in its variables. */
@@ -140,6 +145,29 @@ export async function sendWhatsappTemplate(input: {
   } catch {
     return { ok: false, detail: "respond.io request failed" };
   }
+}
+
+/**
+ * Send a synced template by its human-chosen name, filling body placeholders
+ * positionally (bodyValues[0] → {{1}}, etc). Used by automated ticket-lifecycle
+ * notifications, which don't have per-key values from a form.
+ */
+export async function sendTemplateByName(
+  to: string,
+  name: string,
+  bodyValues: string[],
+): Promise<SendTemplateResult> {
+  const template = await getSyncedTemplateByName(name);
+  if (!template) return { ok: false, detail: `Template "${name}" not synced yet.` };
+
+  const variables = extractTemplateVariables(template.components);
+  const ordered = [...variables].sort((a, b) => a.placeholderIndex - b.placeholderIndex);
+  const values: Record<string, string> = {};
+  ordered.forEach((v, i) => {
+    values[v.key] = bodyValues[i] ?? "";
+  });
+
+  return sendWhatsappTemplate({ to, templateId: template.templateId, values });
 }
 
 export type RespondContact = {
