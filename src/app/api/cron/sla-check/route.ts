@@ -9,9 +9,17 @@ export const dynamic = "force-dynamic";
 
 const WARNING_WINDOW_HOURS = 2;
 
+/**
+ * SLA sweep: warn assignees before their deadline, alert them once it passes.
+ *
+ * Nothing schedules this any more — SLA state is shown live on the dashboard
+ * instead (see `getDashboardStats`). The endpoint is kept so the push
+ * notifications can be switched back on by pointing any external scheduler at
+ * it, but it stays shut unless CRON_SECRET is set and presented.
+ */
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
-  if (secret && request.headers.get("authorization") !== `Bearer ${secret}`) {
+  if (!secret || request.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
