@@ -16,7 +16,7 @@ import { runAgent, questionOptions, type AgentContext, type AgentQuestion } from
 import { missingRequired, questionBudget } from "./guardrails";
 import { insightFromAgent } from "./enrich";
 import { findRelatedTickets } from "./recurrence";
-import { contextFromResults, momenceAvailable, runTools, type ToolResult } from "./agent-tools";
+import { momenceAvailable, runTools, type ToolResult } from "./agent-tools";
 import type { ChatMessage, ChatOption } from "./types";
 
 /** Steps owned by the deterministic review / edit machinery, not the agent. */
@@ -185,7 +185,12 @@ function applySlots(
       case "member": d.memberName = str; break;
       case "memberContact": d.memberContact = str; break;
       case "trainer": d.trainerName = str; break;
-      case "classInfo": d.classInfo = str; break;
+      case "classInfo": {
+        // A session resolved against Momence outranks the reporter's shorthand.
+        if (d.momenceSessionId && d.classInfo) break;
+        d.classInfo = str;
+        break;
+      }
       case "location": {
         // The studio itself is not an area within the studio.
         if (resolveStudio(str, ctx.studios)) break;
@@ -202,6 +207,16 @@ function applySlots(
       case "witnesses": d.witnesses = str; break;
       case "amount": d.amount = str; break;
       case "notes": d.notes = str; break;
+      case "momenceSessionId": {
+        const id = Number(str);
+        if (Number.isFinite(id) && id > 0) d.momenceSessionId = id;
+        break;
+      }
+      case "momenceMemberId": {
+        const id = Number(str);
+        if (Number.isFinite(id) && id > 0) d.momenceMemberId = id;
+        break;
+      }
       default: {
         if (slot.startsWith("custom:")) {
           const label = slot
@@ -213,6 +228,88 @@ function applySlots(
       }
     }
   }
+}
+
+/**
+ * A Momence session search built from whatever the reporter named, or null when
+ * nothing class-shaped was mentioned and a lookup would be noise.
+ */
+function sessionQuery(
+  s: IntakeState,
+  slots: Record<string, { value: string | boolean | null }>,
+  studios: EngineContext["studios"],
+): { query?: string; date?: string; locationId?: number } | null {
+  const classInfo = String(slots.classInfo?.value ?? s.data.classInfo ?? "").trim();
+  if (!classInfo || /not class specific/i.test(classInfo)) return null;
+
+  // Strip clock times — Momence matches on the class name, not "10.30am".
+  const query = classInfo
+    .replace(/\b\d{1,2}[.:]?\d{0,2}\s?(am|pm)\b/gi, " ")
+    .replace(/[(),]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (query.length < 3) return null;
+
+  const occurred = String(slots.occurredAt?.value ?? s.data.occurredAt ?? "");
+  const today = new Date().toISOString().slice(0, 10);
+  const date = /just now|today|this morning|this afternoon|this evening|tonight/i.test(occurred)
+    ? today
+    : /yesterday/i.test(occurred)
+      ? new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+      : undefined;
+
+  const locationId = studios.find((st) => st.id === s.data.studioId)?.momenceLocationId ?? undefined;
+
+  // Several classes named at once means no single search term fits — pull the
+  // day's timetable for that studio instead and let the agent match them up.
+  const multiple = /,| and /i.test(classInfo);
+  if (multiple && date) return { date, locationId: locationId ?? undefined };
+
+  return { query: query.split(" ").slice(0, 4).join(" "), date, locationId: locationId ?? undefined };
+}
+
+export type SessionRow = { id: number; label: string; time: string | null };
+
+/** Parse the `id=… Name · Fri, 4 Sept, 7:15 pm · Teacher` rows a lookup returns. */
+export function parseSessionRows(result: string): SessionRow[] {
+  return result
+    .split("\n")
+    .map((line) => {
+      const id = Number(line.match(/^id=(\d+)/)?.[1]);
+      if (!Number.isFinite(id)) return null;
+      const label = line.replace(/^id=\d+\s*/, "").trim();
+      const time = label.match(/\b(\d{1,2}):(\d{2})\s?(am|pm)\b/i)?.[0] ?? null;
+      return { id, label, time };
+    })
+    .filter((row): row is SessionRow => row !== null);
+}
+
+/** Clock times mentioned by the reporter, normalised to "h:mm am/pm". */
+export function reportedTimes(text: string): string[] {
+  const found = [...text.matchAll(/\b(\d{1,2})[.:]?(\d{2})?\s?(am|pm)\b/gi)];
+  return found.map((m) => `${Number(m[1])}:${m[2] ?? "00"} ${m[3].toLowerCase()}`);
+}
+
+function normaliseTime(value: string): string {
+  const m = value.match(/(\d{1,2}):(\d{2})\s?(am|pm)/i);
+  return m ? `${Number(m[1])}:${m[2]} ${m[3].toLowerCase()}` : value.toLowerCase();
+}
+
+/**
+ * Pick the session a report is talking about, but only when it is beyond doubt:
+ * exactly one row whose start time matches a time the reporter gave, or a single
+ * row overall. Anything ambiguous is left for the agent (or the reporter) to
+ * resolve — a wrong session id on a ticket is worse than no session id.
+ */
+export function matchSession(rows: SessionRow[], reportText: string): SessionRow | null {
+  if (rows.length === 0) return null;
+
+  const times = new Set(reportedTimes(reportText));
+  if (times.size > 0) {
+    const hits = rows.filter((row) => row.time && times.has(normaliseTime(row.time)));
+    return hits.length === 1 ? hits[0] : null;
+  }
+  return rows.length === 1 ? rows[0] : null;
 }
 
 function knownForAgent(s: IntakeState): Record<string, string> {
@@ -227,6 +324,8 @@ function knownForAgent(s: IntakeState): Record<string, string> {
   put("memberContact", d.memberContact);
   put("trainer", d.trainerName);
   put("classInfo", d.classInfo);
+  put("momenceSessionId", d.momenceSessionId);
+  put("momenceMemberId", d.momenceMemberId);
   put("classAt", d.classAt);
   put("location", d.location);
   put("systemAffected", d.systemAffected);
@@ -422,8 +521,6 @@ export async function runAgentTurn(
     hooks.onStatus?.(`Looking up ${calls.map((c) => c.tool.replace(/_/g, " ")).join(", ")} in Momence`);
     const fresh = await runTools(calls);
     toolResults.push(...fresh);
-    const momence = contextFromResults(toolResults);
-    if (momence) s.data.momenceContext = { ...(s.data.momenceContext ?? {}), ...momence };
     hooks.onReplyRestart?.();
     const next = await runAgent(
       convo,
@@ -433,6 +530,49 @@ export async function runAgentTurn(
     if (!next.ok || !next.turn) break;
     result = next;
   }
+  // Resolving a named class to a real Momence session is the point of the
+  // integration, and the model does it only sometimes. So: make sure the lookup
+  // happens, then pick the row in code whenever the answer is unambiguous.
+  if (toolsEnabled && result.turn && !s.data.momenceSessionId) {
+    // Run our own lookup even if the model already made one: its search is
+    // often unscoped or oddly worded, and comes back empty. Ours is filtered by
+    // the studio's Momence location and the day the report is about. Once per
+    // session, so a conversation cannot accumulate lookups.
+    const named = s.autoLookupDone ? null : sessionQuery(s, result.turn.slots, ctx.studios);
+
+    if (named) {
+      hooks.onStatus?.("Matching the class in Momence");
+      s.autoLookupDone = true;
+      toolResults.push(...(await runTools([{ tool: "find_sessions", args: named }])));
+    }
+
+    const rows = toolResults
+      .filter((r) => r.tool === "find_sessions")
+      .flatMap((r) => parseSessionRows(r.result));
+    const reported = `${String(result.turn.slots.classInfo?.value ?? s.data.classInfo ?? "")} ${narrative}`;
+    const hit = matchSession(rows, reported);
+    if (hit) {
+      s.data.momenceSessionId = hit.id;
+      s.data.classInfo = hit.label;
+      s.data.momenceContext = {
+        ...(s.data.momenceContext ?? {}),
+        sessionId: hit.id,
+        sessionName: hit.label,
+      };
+    }
+
+    // Only worth another model call when we fetched something it has not seen.
+    if (named) {
+      hooks.onReplyRestart?.();
+      const next = await runAgent(
+        convo,
+        { ...agentCtx, known: knownForAgent(s), toolResults },
+        { onReplyDelta: hooks.onReplyDelta },
+      );
+      if (next.ok && next.turn) result = next;
+    }
+  }
+
   s.toolResults = toolResults;
 
   const turn = result.turn!;

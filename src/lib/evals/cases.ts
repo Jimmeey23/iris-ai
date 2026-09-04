@@ -25,6 +25,13 @@ export type EvalCase = {
     mustNotAsk?: string[];
     /** Upper bound on questions before the draft appears. */
     maxQuestions: number;
+    /**
+     * Lower bound. A report can be detailed and still have an owner-critical
+     * gap; drafting straight past it is a failure, not efficiency.
+     */
+    minQuestions?: number;
+    /** Momence lookups the agent must run (needs a live Momence connection). */
+    mustLookUp?: string[];
     /** Substrings that must appear somewhere in title + summary + rootCause. */
     mustMention?: string[];
   };
@@ -41,7 +48,8 @@ export const EVAL_CASES: EvalCase[] = [
       minPriority: "High",
       slotsFilled: ["studio", "occurredAt", "actionTaken", "trainer", "classInfo"],
       mustNotAsk: ["member", "memberContact", "raisedFor"],
-      maxQuestions: 2,
+      minQuestions: 1,
+      maxQuestions: 3,
       mustMention: ["power", "kemps"],
     },
   },
@@ -50,6 +58,7 @@ export const EVAL_CASES: EvalCase[] = [
     report:
       "A member, Priya Shah, complained that the trainer for the 7am Barre 57 at Bandra turned up 12 minutes late and the class was cut short. She's on an annual membership and is quite upset.",
     answers: ["Neha", "First time"],
+    // A named member and a named session are exactly what Momence is for.
     expect: {
       category: ["Trainer Feedback", "Class Experience", "Customer Service and Communication"],
       subcategoryLike: ["punctual", "late", "start", "duration", "length"],
@@ -126,6 +135,23 @@ export const EVAL_CASES: EvalCase[] = [
       mustNotAsk: ["member", "memberContact", "trainer"],
       maxQuestions: 2,
       mustMention: ["barre"],
+    },
+  },
+  {
+    // Momence is what turns "the 7pm cycle" into a real session with a real
+    // teacher and a real booking count. If the agent will not reach for it
+    // here, the integration is decorative.
+    id: "momence-session-lookup",
+    report:
+      "The 7:15pm powerCycle Express at Kemps Corner today was a mess — bikes weren't set up and it started late. Nobody has complained formally yet.",
+    expect: {
+      category: ["Class Experience", "Repair and Maintenance", "Trainer Feedback", "Scheduling"],
+      // Session id resolution is asserted end to end in session-resolution.test.ts,
+      // against the production path that also scopes the search by studio.
+      slotsFilled: ["studio", "classInfo"],
+      mustNotAsk: ["member", "memberContact"],
+      maxQuestions: 3,
+      mustLookUp: ["find_sessions"],
     },
   },
   {

@@ -45,7 +45,14 @@ export type ChatTurnResponse = {
 async function buildContext(reporter?: { name?: string; role?: string }): Promise<EngineContext> {
   const studios = await getStudios();
   return {
-    studios: studios.map((s) => ({ id: s.id, name: s.name, code: s.code, city: s.city, isHq: s.isHq })),
+    studios: studios.map((s) => ({
+      id: s.id,
+      name: s.name,
+      code: s.code,
+      city: s.city,
+      isHq: s.isHq,
+      momenceLocationId: s.momenceLocationId,
+    })),
     reporter: {
       name: reporter?.name?.trim() || "Studio Team",
       role: reporter?.role?.trim() || "Internal Team Member",
@@ -115,8 +122,11 @@ export async function runChatTurn(
     state = result.state;
     messages = result.messages;
 
-    // Legacy path only: the agent already produced its own insight in-turn.
-    if (!usedAgent && state.step === "review" && !result.createDraft) {
+    // Re-enrich only when there is nothing to reuse. The reporter reviews a
+    // draft, opens the edit menu, comes back — and the ticket must read exactly
+    // the same each time. Re-scoring it on every visit made sentiment, urgency
+    // and root cause drift between identical views of the same draft.
+    if (!usedAgent && state.step === "review" && !result.createDraft && !state.insight) {
       const d = state.data;
       const insight = await aiEnrich({
         text: [d.rawText ?? "", d.notes ?? ""].filter(Boolean).join(" "),
@@ -130,6 +140,7 @@ export async function runChatTurn(
         classInfo: d.classInfo,
         membershipRef: d.membershipRef,
       });
+      state = { ...state, insight };
       messages = messages.map((m) => (m.kind === "draft" ? reviewMessage(state, ctx, insight) : m));
     }
 

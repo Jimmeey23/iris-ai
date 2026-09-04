@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveStudio } from "./agent-session";
+import { matchSession, parseSessionRows, reportedTimes, resolveStudio } from "./agent-session";
 
 const STUDIOS = [
   { id: 1, name: "Kwality House, Kemps Corner", code: "KC", city: "Mumbai", isHq: false },
@@ -39,5 +39,66 @@ describe("resolveStudio", () => {
   it("returns null for nonsense", () => {
     expect(resolveStudio("", STUDIOS)).toBeNull();
     expect(resolveStudio("somewhere else entirely", STUDIOS)).toBeNull();
+  });
+});
+
+
+const TIMETABLE = [
+  "id=141066997 powerCycle Express · Fri, 4 Sept, 7:15 pm · Anisha Shah · Kwality House, Kemps Corner · 3/10 booked",
+  "id=141066998 Barre 57 · Fri, 4 Sept, 10:00 am · Neha Rao · Kwality House, Kemps Corner · 8/12 booked",
+  "id=141066999 Studio FIT · Fri, 4 Sept, 11:00 am · KV · Kwality House, Kemps Corner · 5/12 booked",
+].join("\n");
+
+describe("parseSessionRows", () => {
+  it("reads id, label and start time from each row", () => {
+    const rows = parseSessionRows(TIMETABLE);
+    expect(rows).toHaveLength(3);
+    expect(rows[0].id).toBe(141066997);
+    expect(rows[0].time).toBe("7:15 pm");
+    expect(rows[0].label).toContain("powerCycle Express");
+  });
+
+  it("ignores lines that are not sessions", () => {
+    expect(parseSessionRows("no sessions matched")).toEqual([]);
+  });
+});
+
+describe("reportedTimes", () => {
+  it("normalises the ways staff write times", () => {
+    expect(reportedTimes("BBB at 10 am, cycle at 10.30am and FIT at 11 am")).toEqual([
+      "10:00 am",
+      "10:30 am",
+      "11:00 am",
+    ]);
+    expect(reportedTimes("the 7:15pm powerCycle")).toEqual(["7:15 pm"]);
+  });
+});
+
+describe("matchSession", () => {
+  it("matches on an unambiguous reported time", () => {
+    expect(matchSession(parseSessionRows(TIMETABLE), "the 7:15pm powerCycle was late")?.id).toBe(
+      141066997,
+    );
+  });
+
+  it("takes the only row when the reporter gave no time", () => {
+    const one = parseSessionRows(TIMETABLE.split("\n")[0]);
+    expect(matchSession(one, "the cycle class was a mess")?.id).toBe(141066997);
+  });
+
+  it("refuses when several reported times could apply", () => {
+    expect(matchSession(parseSessionRows(TIMETABLE), "10 am BBB and 11 am FIT were hit")).toBeNull();
+  });
+
+  it("refuses when no row matches the reported time", () => {
+    expect(matchSession(parseSessionRows(TIMETABLE), "the 6:00 am class")).toBeNull();
+  });
+
+  it("refuses to guess from a whole timetable with no time given", () => {
+    expect(matchSession(parseSessionRows(TIMETABLE), "a class today was bad")).toBeNull();
+  });
+
+  it("handles an empty result", () => {
+    expect(matchSession([], "the 7:15pm powerCycle")).toBeNull();
   });
 });

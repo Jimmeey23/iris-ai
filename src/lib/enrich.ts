@@ -409,7 +409,7 @@ export async function insightFromAgent(input: {
     : base.sentiment;
 
   const { priority, reason } = enforcePriority(a.priority, input.text, a.priorityReason);
-  const urgencyScore = enforceUrgency(a.urgencyScore, priority);
+  const provisionalUrgency = enforceUrgency(a.urgencyScore, priority);
 
   const churnRisk = (["Low", "Medium", "High"] as const).includes(a.churnRisk as never)
     ? (a.churnRisk as AiInsight["churnRisk"])
@@ -421,7 +421,7 @@ export async function insightFromAgent(input: {
   const sla = computeSla({
     category: input.category,
     subcategory: input.subcategory,
-    urgencyScore,
+    urgencyScore: provisionalUrgency,
     churnRisk,
     sentiment,
     impact: input.impact,
@@ -432,6 +432,9 @@ export async function insightFromAgent(input: {
   // SLA may only escalate priority further, never soften the guardrail floor.
   const order: Priority[] = ["Low", "Medium", "High", "Critical"];
   const finalPriority = order[Math.max(order.indexOf(priority), order.indexOf(sla.priority))];
+  // Re-band against the priority that actually ships, or a ticket can read
+  // "High" next to an urgency of 35.
+  const urgencyScore = enforceUrgency(provisionalUrgency, finalPriority);
 
   return {
     title: (a.title?.trim() || base.title).slice(0, 140),

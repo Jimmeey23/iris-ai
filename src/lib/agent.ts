@@ -13,6 +13,7 @@ export const CANONICAL_SLOTS = [
   "studio", "raisedFor", "member", "memberContact", "trainer", "classInfo",
   "location", "systemAffected", "membershipRef", "occurredAt", "impact",
   "atRisk", "frequency", "actionTaken", "witnesses", "amount", "notes",
+  "momenceSessionId", "momenceMemberId",
 ] as const;
 export type CanonicalSlot = (typeof CANONICAL_SLOTS)[number];
 
@@ -124,6 +125,9 @@ WHAT EACH SLOT MEANS — keep them distinct, they land in different ticket field
 - frequency: first time, repeat, or chronic.
 - actionTaken: what the team already did on the floor. Capture it whenever anything was done.
 - witnesses / amount / notes: as named.
+- momenceSessionId / momenceMemberId: the numeric id from a lookup result. When the lookup results contain a row that clearly matches what was reported — the class name and start time line up, or only one candidate exists — SET IT. That id is what lets the owner open the real session, its roster and its bookings. Only leave it out when several rows could plausibly be the one, or none match; a timetable lists every class of the day, and a wrong id is worse than none.
+  When you set momenceSessionId, also correct classInfo to the session's real name and time from the lookup, rather than the reporter's shorthand.
+  A candidate only matches if its DATE and TIME agree with what was reported. A session on another day is not the one being reported, however similar the name. If nothing in the results lines up, keep the reporter's own wording for classInfo and set no id — never replace what they told you with a session they did not mean.
 
 PICKING THE CATEGORY
 Choose the category whose DOMAIN owns the problem, then the best subcategory inside it. Subcategory wording that happens to appear under another category is not a reason to move the ticket there.
@@ -135,7 +139,15 @@ Choose the category whose DOMAIN owns the problem, then the best subcategory ins
 - injury, hazard, security → Safety and Security
 
 WHEN TO ASK A QUESTION
-Ask only when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. Ask at most ONE question per turn, and prefer none.
+Ask only when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. Ask at most ONE question per turn.
+A detailed report is not the same as a complete one. Going straight to the draft while an owner-critical gap is still open is worse than asking one more question.
+
+ALWAYS ESTABLISH THESE BEFORE DRAFTING — ask, or look them up, whenever they are relevant and unknown:
+- Whether the problem is RESOLVED or still happening right now. For any fault — an outage, a leak, a broken machine, a system down — this decides whether the owner is fixing something live or writing it up after the fact. Never draft an unresolved-sounding fault without knowing its current state.
+- Whether members were materially affected, and what was offered them — a credit, a refund, a free class, or nothing yet. This is what the owner has to action.
+- For an incident spanning several classes or hours: when it started and when it ended.
+- When a class is named and lookup results are available, which real Momence session it was. Match it and set momenceSessionId.
+
 Do NOT ask:
 - anything already stated or safely inferable
 - who the member is when the reporter says they noticed it themselves, or when no individual member is involved
@@ -144,6 +156,7 @@ Do NOT ask:
 - anything already listed in QUESTIONS ALREADY ASKED. If an earlier question went unanswered, let it go and draft the ticket without it.
 Use the id "studio" — never a custom id — whenever you need to know which studio it is.
 You MAY invent a question no fixed field covers, when that question is what the owner would actually need. Give it an id of "custom:<short_key>". These are often the most valuable questions you ask.
+Prefer looking a fact up over asking for it whenever a lookup can answer it — the reporter is standing on a studio floor.
 Give multiple-choice options whenever the sensible answers are enumerable — it is faster to tap than to type. Always allow free text as well.
 
 HOW YOU SPEAK
@@ -164,7 +177,7 @@ Return STRICT JSON only, matching this shape exactly:
     "<slotId>": {"value": "...", "quote": "the words in the transcript this came from"}
   },
   "secondaryIssues": [{"title": "...", "category": "...", "subcategory": "...", "summary": "..."}],
-  "extraDetails": {"Label shown on the ticket": "value"},
+  "extraDetails": {"<your own short label>": "<the fact>"},
   "nextQuestion": {
     "id": "<slotId or custom:key>",
     "ask": "the question, under 18 words",
@@ -200,6 +213,7 @@ Rules for the JSON:
 - "occurredAt" is a human phrase such as "Just now", "Earlier today, 10:00-11:30 am".
 - "actionTaken" is anything the team already did on the floor. Capture it whenever it is mentioned — it is the most commonly lost detail.
 - Always include "raisedFor" and "impact" in slots once you can infer them, even on the first turn.
+- "extraDetails" keys are labels you invent for facts no slot covers ("Rooms affected", "Cooler moved at"). Never copy the placeholder text above, and never restate the title or summary there. Omit the field when there is nothing extra.
 - Omit "toolCalls" entirely unless you are requesting a lookup this turn.
 - Emit "insight" ONLY when "readyForDraft" is true. Otherwise omit it.
 - Set "nextQuestion" to null when "readyForDraft" is true, and vice versa.
@@ -370,12 +384,25 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
         const r = resolveClassification(i.category, i.subcategory, `${i.title} ${i.summary ?? ""}`);
         return { ...i, category: r.category, subcategory: r.subcategory };
       }),
-    extraDetails: raw.extraDetails ?? {},
+    extraDetails: cleanExtraDetails(raw.extraDetails),
     nextQuestion: readyForDraft || toolCalls.length ? null : nextQuestion,
     readyForDraft,
     toolCalls,
     insight: readyForDraft ? raw.insight : undefined,
   };
+}
+
+/** Placeholder keys copied out of the schema example are not ticket detail. */
+const JUNK_DETAIL_KEY = /^(<|label shown on the ticket|label|key|value|your own short label|title|summary)$|^<.*>$/i;
+
+function cleanExtraDetails(raw: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [label, value] of Object.entries(raw ?? {})) {
+    const key = label.trim();
+    if (!key || !value || JUNK_DETAIL_KEY.test(key)) continue;
+    out[key] = String(value);
+  }
+  return out;
 }
 
 function clamp01(n: unknown): number {

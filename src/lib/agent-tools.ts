@@ -21,10 +21,17 @@ export type ToolResult = { tool: string; args?: Record<string, unknown>; result:
 
 /** Description block injected into the prompt so the model knows what exists. */
 export const TOOL_CATALOGUE = `AVAILABLE LOOKUPS (read-only, Momence)
-Call one only when the answer would genuinely sharpen the ticket AND you cannot get it from the reporter faster. Never call a lookup for something the reporter already told you.
+Momence is the studio's live booking system. It is the difference between a ticket that says "10 AM class" and one that says which session, which teacher, and how many members were booked into it. Use it.
+
+USE A LOOKUP WHENEVER:
+- the reporter names a class by time, format or teacher → find_sessions, then record the real session name, start time and teacher. Loose text like "10 AM" is not good enough for the owner.
+- members were affected and you need to know how many were actually booked → session_attendees
+- a member is named → search_member for their id and contact, then member_context if their package, credits or visit history bears on the issue
+Resolving a report against real sessions is normally worth one round of lookups before you ask the reporter anything.
+Never look up something the reporter already told you, and never repeat a lookup you have already made.
 - search_member {"query": "name, email or phone"} → matching members with id, contact and visit counts
 - member_context {"memberId": 123} → that member's memberships, credits left and recent bookings
-- find_sessions {"query": "class name or teacher", "date": "YYYY-MM-DD"} → real sessions with exact times and teachers
+- find_sessions {"query": "class name or teacher", "date": "YYYY-MM-DD", "locationId": 9030} → real sessions with exact times and teachers. Omit "query" to see a whole day's timetable for a location, which is the right call when several classes are involved.
 - session_attendees {"sessionId": 123} → who was booked into that session
 
 To use one, return "toolCalls": [{"tool": "...", "args": {...}}] with "nextQuestion": null and "readyForDraft": false. You will be called again with the results and can then continue. At most 3 lookups per report — never repeat a lookup you already made.`;
@@ -95,12 +102,24 @@ async function runOne(call: ToolCall): Promise<string> {
     case "find_sessions": {
       const query = args.query ? String(args.query) : undefined;
       const date = args.date ? String(args.date) : undefined;
-      const startAfter = date ? `${date}T00:00:00.000Z` : undefined;
-      const startBefore = date ? `${date}T23:59:59.000Z` : undefined;
-      const sessions = await listSessions({ query, startAfter, startBefore, pageSize: 25 });
+      const locationId = Number.isFinite(Number(args.locationId)) ? Number(args.locationId) : undefined;
+      // Never return an unbounded slice of the timetable. Without a date the
+      // window is the last week plus tomorrow, so a report about "this morning"
+      // can never be matched against a session months away.
+      const day = (offsetDays: number) =>
+        new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
+      const startAfter = date ? `${date}T00:00:00.000Z` : `${day(-7)}T00:00:00.000Z`;
+      const startBefore = date ? `${date}T23:59:59.000Z` : `${day(1)}T23:59:59.000Z`;
+      let sessions = await listSessions({ query, startAfter, startBefore, locationId, pageSize: 40 });
+      // A studio's own shorthand ("BBB", "FIT") rarely matches Momence's class
+      // names. Falling back to the day's timetable is far more useful than
+      // reporting nothing.
+      if (!sessions.length && query) {
+        sessions = await listSessions({ startAfter, startBefore, locationId, pageSize: 40 });
+      }
       if (!sessions.length) return "no sessions matched";
       return sessions
-        .slice(0, MAX_ROWS)
+        .slice(0, 20)
         .map(
           (s) =>
             `id=${s.id} ${s.name} · ${istDate(s.startsAt)}` +
@@ -155,26 +174,9 @@ export async function momenceAvailable(): Promise<boolean> {
 }
 
 /**
- * Structured Momence facts worth attaching to the ticket itself, derived from
- * whatever the agent looked up.
+ * Note: there is deliberately no helper that infers a member or session id from
+ * lookup results. Picking the first row of a timetable attaches a plausible but
+ * wrong id, which is worse than attaching none — the agent sets
+ * `momenceSessionId` / `momenceMemberId` explicitly when it is sure which row
+ * is the right one.
  */
-export function contextFromResults(results: ToolResult[]): MomenceContext | undefined {
-  const memberHit = results.find((r) => r.tool === "search_member" && r.result.startsWith("id="));
-  const sessionHit = results.find((r) => r.tool === "find_sessions" && r.result.startsWith("id="));
-  if (!memberHit && !sessionHit) return undefined;
-
-  const ctx: MomenceContext = {};
-  if (memberHit) {
-    const line = memberHit.result.split("\n")[0];
-    const id = Number(line.match(/^id=(\d+)/)?.[1]);
-    if (Number.isFinite(id)) ctx.memberId = id;
-    ctx.memberEmail = line.match(/<([^>]+)>/)?.[1];
-  }
-  if (sessionHit) {
-    const line = sessionHit.result.split("\n")[0];
-    const id = Number(line.match(/^id=(\d+)/)?.[1]);
-    if (Number.isFinite(id)) ctx.sessionId = id;
-    ctx.sessionName = line.split("·")[0].replace(/^id=\d+\s*/, "").trim() || undefined;
-  }
-  return ctx;
-}

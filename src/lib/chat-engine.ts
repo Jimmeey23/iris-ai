@@ -16,7 +16,15 @@ import {
   inferFromText,
 } from "./chat-inference";
 
-export type EngineStudio = { id: number; name: string; code: string; city: string; isHq: boolean };
+export type EngineStudio = {
+  id: number;
+  name: string;
+  code: string;
+  city: string;
+  isHq: boolean;
+  /** Lets Momence lookups be scoped to the right physical location. */
+  momenceLocationId?: number | null;
+};
 
 export type EngineContext = {
   studios: EngineStudio[];
@@ -70,6 +78,8 @@ export type IntakeState = {
   /** Question ids the LLM agent has already put to this reporter. */
   agentAsked?: string[];
   pendingQuestionId?: string | null;
+  /** Whether the studio-scoped session lookup has already been run this session. */
+  autoLookupDone?: boolean;
   /** Momence lookups already run this session, kept so they are never repeated. */
   toolResults?: { tool: string; args?: Record<string, unknown>; result: string }[];
   /** Insight computed once at draft time and reused on approval. */
@@ -1171,6 +1181,9 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
         priority: () => { d.priorityOverride = undefined; },
       };
       clear[field]?.();
+      // The cached read no longer describes this ticket — score it again once
+      // the new answer is in. (Merely viewing the draft must not do this.)
+      s.insight = undefined;
       s.editingField = field;
       const step = nextStep(s);
       s.step = step;

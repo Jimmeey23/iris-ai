@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EVAL_CASES, type EvalCase } from "./cases";
 import { runAgent, type AgentContext } from "../agent";
+import { momenceAvailable, runTools, type ToolResult } from "../agent-tools";
 import { insightFromAgent } from "../enrich";
 import { PRIORITIES, type Priority } from "../taxonomy";
 import type { ChatMessage } from "../types";
@@ -30,6 +31,7 @@ function msg(role: "user" | "assistant", content: string): ChatMessage {
 
 type RunOutcome = {
   questions: string[];
+  lookups: string[];
   slots: Record<string, string>;
   category: string;
   subcategory: string;
@@ -37,11 +39,13 @@ type RunOutcome = {
   narrative: string;
 };
 
-async function runCase(c: EvalCase): Promise<RunOutcome> {
+async function runCase(c: EvalCase, toolsEnabled: boolean): Promise<RunOutcome> {
   const transcript: ChatMessage[] = [msg("user", c.report)];
   const answers = [...(c.answers ?? [])];
   let nextAnswer = 0;
   const questions: string[] = [];
+  const lookups: string[] = [];
+  const toolResults: ToolResult[] = [];
   const slots: Record<string, string> = {};
   let category = "";
   let subcategory = "";
@@ -54,6 +58,8 @@ async function runCase(c: EvalCase): Promise<RunOutcome> {
       known: { ...slots },
       asked: [...questions],
       relatedTickets: [],
+      toolsEnabled,
+      toolResults,
     };
     const res = await runAgent(transcript, ctx);
     expect(res.ok, `agent call failed: ${res.error}`).toBe(true);
@@ -62,6 +68,12 @@ async function runCase(c: EvalCase): Promise<RunOutcome> {
     category = t.classification.category;
     subcategory = t.classification.subcategory;
     for (const [k, v] of Object.entries(t.slots)) slots[k] = String(v.value);
+
+    if (t.toolCalls?.length) {
+      lookups.push(...t.toolCalls.map((call) => call.tool));
+      toolResults.push(...(await runTools(t.toolCalls)));
+      continue;
+    }
 
     // A reporter volunteers things unprompted too. If the case still has
     // scripted turns left, deliver them before accepting the draft.
@@ -84,6 +96,7 @@ async function runCase(c: EvalCase): Promise<RunOutcome> {
       insightPriority = insight.priority;
       return {
         questions,
+        lookups,
         slots,
         category,
         subcategory,
@@ -117,9 +130,12 @@ describe.skipIf(!HAS_KEY)("intake agent evals", () => {
     it(
       c.id,
       async () => {
-        const out = await runCase(c);
+        // Lookups need a live Momence; without one the case still runs, minus
+        // any mustLookUp assertions.
+        const toolsEnabled = (c.expect.mustLookUp?.length ?? 0) > 0 ? await momenceAvailable() : false;
+        const out = await runCase(c, toolsEnabled);
         const report = JSON.stringify(
-          { category: out.category, subcategory: out.subcategory, priority: out.priority, questions: out.questions, slots: out.slots },
+          { category: out.category, subcategory: out.subcategory, priority: out.priority, questions: out.questions, lookups: out.lookups, slots: out.slots },
           null,
           2,
         );
@@ -151,6 +167,19 @@ describe.skipIf(!HAS_KEY)("intake agent evals", () => {
           out.questions.length,
           `asked ${out.questions.length} questions (${out.questions.join(", ")}), budget ${c.expect.maxQuestions}\n${report}`,
         ).toBeLessThanOrEqual(c.expect.maxQuestions);
+
+        if (c.expect.minQuestions) {
+          expect(
+            out.questions.length,
+            `drafted after only ${out.questions.length} question(s) — an owner-critical gap was skipped\n${report}`,
+          ).toBeGreaterThanOrEqual(c.expect.minQuestions);
+        }
+
+        if (c.expect.mustLookUp?.length && toolsEnabled) {
+          for (const tool of c.expect.mustLookUp) {
+            expect(out.lookups, `never called "${tool}" (called: ${out.lookups.join(", ") || "nothing"})\n${report}`).toContain(tool);
+          }
+        }
 
         for (const slot of c.expect.slotsFilled ?? []) {
           expect(slots(out, slot), `slot "${slot}" was never filled\n${report}`).toBe(true);

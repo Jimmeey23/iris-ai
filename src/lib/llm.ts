@@ -55,8 +55,17 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
     return { ok: false, error: "no-api-key", latencyMs: 0 };
   }
   const model = await modelFor(call.tier ?? "reason");
-  const attempts = (call.retries ?? 1) + 1;
+  const attempts = (call.retries ?? 2) + 1;
   let lastError = "unknown";
+
+  /** Honour Retry-After when the API sends it, else back off exponentially. */
+  const wait = async (res: Response | null, attempt: number) => {
+    const header = Number(res?.headers.get("retry-after"));
+    const ms = Number.isFinite(header) && header > 0
+      ? Math.min(header * 1000, 20000)
+      : Math.min(1000 * 2 ** attempt, 8000);
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  };
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -77,8 +86,9 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
       });
       if (!res.ok) {
         lastError = `http-${res.status}`;
-        // Client errors will not fix themselves on retry.
+        // Client errors will not fix themselves on retry; rate limits will.
         if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+        if (attempt < attempts - 1) await wait(res, attempt);
         continue;
       }
       const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
@@ -95,6 +105,7 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
       };
     } catch (err) {
       lastError = err instanceof Error ? err.name : "exception";
+      if (attempt < attempts - 1) await wait(null, attempt);
     }
   }
   return { ok: false, error: lastError, model, latencyMs: Date.now() - started };
