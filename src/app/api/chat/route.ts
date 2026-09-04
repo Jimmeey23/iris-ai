@@ -6,6 +6,8 @@ import { chatSessions } from "@/db/schema";
 import { ensureSeeded } from "@/lib/seed";
 import { getStudios, createTicketFromDraft } from "@/lib/tickets";
 import { aiEnrich } from "@/lib/enrich";
+import { llmAvailable } from "@/lib/llm";
+import { runAgentTurn, type AgentTurnResult } from "@/lib/agent-session";
 import {
   buildDraft,
   createdMessage,
@@ -97,21 +99,35 @@ export async function POST(request: Request) {
     transcript = messages;
   } else {
     const input = body.input ?? {};
-    if (input.text?.trim()) {
+    const pushUser = (content: string) => {
       transcript.push({
         id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: input.text.trim(),
+        content,
         createdAt: new Date().toISOString(),
       });
-    }
+    };
 
-    const result = handleInput(state, input, ctx);
+    // The LLM agent drives intake whenever a key is configured; the on-device
+    // engine stays as the offline fallback and is used automatically if the
+    // model call fails.
+    const agentMode = await llmAvailable();
+    const result = agentMode
+      ? await runAgentTurn(state, transcript, input, ctx)
+      : handleInput(state, input, ctx);
+    const agentResult = result as Partial<AgentTurnResult>;
+    const usedAgent = agentResult.usedAgent === true;
+
+    // Record the reporter's turn in their own words. In agent mode that includes
+    // option and picker clicks, which the agent must be able to re-read.
+    const spoken = (usedAgent ? agentResult.userUtterance : undefined) ?? input.text?.trim();
+    if (spoken) pushUser(spoken);
+
     state = result.state;
     messages = result.messages;
 
-    // Run the richer AI pass when the draft is first shown and when it is approved.
-    if (state.step === "review" && !result.createDraft) {
+    // Legacy path only: the agent already produced its own insight in-turn.
+    if (!usedAgent && state.step === "review" && !result.createDraft) {
       const d = state.data;
       const insight = await aiEnrich({
         text: [d.rawText ?? "", d.notes ?? ""].filter(Boolean).join(" "),
@@ -128,8 +144,8 @@ export async function POST(request: Request) {
       messages = messages.map((m) => (m.kind === "draft" ? reviewMessage(state, ctx, insight) : m));
     }
 
-    // Warm, situation-aware rewrite of the next question when a key is present.
-    const slot = STEP_SLOT[state.step];
+    // Warm, situation-aware rewrite of the next question — legacy path only.
+    const slot = usedAgent ? undefined : STEP_SLOT[state.step];
     if (slot && messages.length > 0 && !result.createDraft) {
       const last = messages[messages.length - 1];
       if (last.role === "assistant" && !last.draft && !last.created) {
@@ -163,18 +179,22 @@ export async function POST(request: Request) {
 
     if (result.createDraft) {
       const d = state.data;
-      const insight = await aiEnrich({
-        text: [d.rawText ?? "", d.notes ?? ""].filter(Boolean).join(" "),
-        category: d.category ?? "Miscellaneous",
-        subcategory: d.subcategory ?? "",
-        impact: d.impact,
-        atRisk: d.atRisk,
-        studioName: d.studioName,
-        memberName: d.memberName,
-        trainerName: d.trainerName,
-        classInfo: d.classInfo,
-        membershipRef: d.membershipRef,
-      });
+      // Reuse the insight the draft was reviewed against so the raised ticket
+      // can never disagree with what the reporter approved.
+      const insight =
+        state.insight ??
+        (await aiEnrich({
+          text: [d.rawText ?? "", d.notes ?? ""].filter(Boolean).join(" "),
+          category: d.category ?? "Miscellaneous",
+          subcategory: d.subcategory ?? "",
+          impact: d.impact,
+          atRisk: d.atRisk,
+          studioName: d.studioName,
+          memberName: d.memberName,
+          trainerName: d.trainerName,
+          classInfo: d.classInfo,
+          membershipRef: d.membershipRef,
+        }));
       const draft = buildDraft(state, ctx, insight);
       const ticket = await createTicketFromDraft(draft);
       state = { ...state, step: "created", createdTicketId: ticket.id };

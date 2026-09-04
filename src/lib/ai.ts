@@ -16,15 +16,30 @@ const STOP_WORDS = new Set([
   "issue", "issues", "problem", "problems", "raise", "ticket", "studio", "physique",
 ]);
 
+/**
+ * Absence is a different problem from excess. "no music" must not score against
+ * the same hints as "music too loud", so negated nouns are rewritten into their
+ * own tokens before any matching happens.
+ */
+function markNegation(text: string): string {
+  return text.replace(
+    /\b(?:no|not any|without|zero|lost|lack of)\s+([a-z]{2,20})/g,
+    (_m, word: string) => `${word}_absent`,
+  );
+}
+
 function normalise(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/wi[-\s]?fi/g, "wifi")
-    .replace(/a\/c\b/g, "ac")
-    .replace(/air[-\s]?con(ditioner)?/g, "ac")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return markNegation(
+    text
+      .toLowerCase()
+      .replace(/wi[-\s]?fi/g, "wifi")
+      .replace(/a\/c\b/g, "ac")
+      .replace(/air[-\s]?con(ditioner)?/g, "ac")
+      .replace(/\belectricity\b/g, "power")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
 }
 
 export function tokenize(text: string): string[] {
@@ -223,13 +238,48 @@ export function extractStudio(
   return null;
 }
 
+const TEACH_VERBS =
+  "conducted|taught|took|led|ran|covered|substituted|subbed|instructed|was teaching|was leading";
+
+/** Name lookalikes that are never a person. */
+const NOT_A_NAME =
+  /^(the|this|that|studio|class|member|client|barre|cycle|fit|mat|power|strength|reception|front|kemps|bandra|juhu|was|is|are|will|has|had|did|said|says|came|arrived|swapped|turned|took|started|ended|and|for|who|she|he|they|not|never|again)$/i;
+
+function cleanName(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const name = raw.trim().replace(/\s+/g, " ");
+  if (!name || NOT_A_NAME.test(name.split(" ")[0])) return null;
+  // Initials and short handles ("kv", "KV") are how studio staff actually write.
+  return name
+    .split(" ")
+    .map((w) => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
+}
+
 export function extractPerson(text: string): string | null {
-  const match = text.match(
-    /\b(?:trainer|instructor|coach|teacher)\s+(?:named\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/,
+  // Deliberately case-sensitive on the second word: a surname is capitalised,
+  // a verb such as "was" is not, and /i would happily swallow the verb.
+  const labelled = text.match(
+    /\b(?:[Tt]rainer|[Ii]nstructor|[Cc]oach|[Tt]eacher)\s+(?:named\s+)?([A-Za-z][A-Za-z.]{1,15}(?:\s+[A-Z][a-z]+)?)/,
   );
-  if (match) return match[1];
-  const match2 = text.match(/\b([A-Z][a-z]{2,})\s+(?:the\s+)?(?:trainer|instructor|coach)\b/);
-  return match2 ? match2[1] : null;
+  if (labelled) {
+    const name = cleanName(labelled[1]);
+    if (name) return name;
+  }
+  const trailing = text.match(
+    /\b([A-Za-z][A-Za-z.]{1,15})\s+(?:the\s+)?(?:trainer|instructor|coach)\b/i,
+  );
+  if (trailing) {
+    const name = cleanName(trailing[1]);
+    if (name) return name;
+  }
+  // "kv conducted the class", "Neha took the 7am"
+  const verbed = text.match(new RegExp(`\\b([A-Za-z][A-Za-z.]{1,15})\\s+(?:${TEACH_VERBS})\\b`, "i"));
+  if (verbed) {
+    const name = cleanName(verbed[1]);
+    if (name) return name;
+  }
+  return null;
 }
 
 export function suggestTags(text: string, category: string, subcategory: string): string[] {

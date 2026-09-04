@@ -176,7 +176,14 @@ export function planSlots(input: {
   const raw = text.toLowerCase();
   const slots: SlotId[] = ["studio", "raisedFor"];
 
-  const memberLed = /member|client|guest|she |he |they /.test(raw) || category === "Pricing and Memberships";
+  // Only chase member identity when an individual member is actually the subject —
+  // a passing mention of "clients" is not a reason to ask who they were.
+  const staffObserved = /\bi (noticed|saw|found|observed|spotted)\b|not member specific/i.test(raw);
+  const memberLed =
+    !staffObserved &&
+    (/\b(a|one|the) (member|client|guest|customer)\b/i.test(raw) ||
+      /\b(member|client|guest|customer)\s+(complained|reported|said|says|told|asked|wants|is upset|flagged|demanded)/i.test(raw) ||
+      category === "Pricing and Memberships");
   if (memberLed) slots.push("member", "memberContact");
 
   const meta = CATEGORY_META[category];
@@ -203,7 +210,8 @@ export function planSlots(input: {
   if (/Trainer Feedback|Customer Service|Class Experience|Repair/.test(category)) {
     slots.push("frequency");
   }
-  if (/Safety|Theft|Repair|Tech|Customer Service/.test(category)) {
+  // What the floor already did is the single most useful line for the owner.
+  if (/Safety|Theft|Repair|Tech|Customer Service|Class Experience|Operating|Amenities/.test(category)) {
     slots.push("actionTaken");
   }
 

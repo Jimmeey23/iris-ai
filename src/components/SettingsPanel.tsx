@@ -11,11 +11,11 @@ type Initial = Record<string, string>;
 type Status = Record<string, { configured: boolean; enabled: boolean }>;
 
 const MODELS = [
-  { id: "gpt-4o-mini", label: "GPT-4o mini — fast & economical" },
-  { id: "gpt-4o", label: "GPT-4o — best reasoning" },
-  { id: "gpt-4.1-mini", label: "GPT-4.1 mini" },
-  { id: "gpt-4.1", label: "GPT-4.1" },
+  { id: "gpt-4.1", label: "GPT-4.1 — recommended for intake" },
+  { id: "gpt-4o", label: "GPT-4o" },
   { id: "o4-mini", label: "o4-mini — deep analysis" },
+  { id: "gpt-4.1-mini", label: "GPT-4.1 mini — cheaper, weaker judgement" },
+  { id: "gpt-4o-mini", label: "GPT-4o mini — cheapest" },
 ];
 
 const TABS = [
@@ -212,17 +212,26 @@ export default function SettingsPanel({
             <Panel title="Language model" subtitle="Bring your own key" action={<StatusDot state={live.openai} />}>
               <div className="space-y-3">
                 <div className="rounded-2xl px-3 py-2.5 text-[11.5px] leading-relaxed txt-2" style={{ background: "var(--surface-3)" }}>
-                  Without a key Iris runs on the built-in NLU — classification, severity, SLA and routing all still work.
-                  A key upgrades titles, summaries, root-cause reasoning, the enhance-message button and the
-                  conversational phrasing of every question. Stored server-side only.
+                  With a key, Iris runs as a reasoning agent: it reads the whole conversation each turn,
+                  classifies by root cause, extracts what you already said and asks only the questions that
+                  change routing, urgency or the fix. Without a key it falls back to the built-in NLU, which
+                  still handles classification, severity, SLA and routing. Stored server-side only.
                 </div>
                 <Field label="OpenAI API key" value={form.openai_api_key ?? ""} onChange={(v) => set("openai_api_key", v)} type="password" placeholder="sk-…" mono
                   hint="Leave the masked value untouched to keep the existing key." />
                 <div>
                   <label className="mb-1 block text-[11px] font-medium txt-2">Model</label>
-                  <select className="field" value={form.openai_model ?? "gpt-4o-mini"} onChange={(e) => set("openai_model", e.target.value)}>
+                  <select className="field" value={form.openai_model ?? "gpt-4.1"} onChange={(e) => set("openai_model", e.target.value)}>
                     {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                   </select>
+                  <p className="mt-1 text-[10.5px] txt-3">Used for classification, extraction, question planning and the ticket write-up.</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium txt-2">Fast model</label>
+                  <select className="field" value={form.openai_model_fast ?? "gpt-4.1-mini"} onChange={(e) => set("openai_model_fast", e.target.value)}>
+                    {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                  <p className="mt-1 text-[10.5px] txt-3">Used for cosmetic rewrites only, where a mistake costs nothing.</p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
@@ -233,7 +242,7 @@ export default function SettingsPanel({
                       <option value="formal">Formal &amp; procedural</option>
                     </select>
                   </div>
-                  <Field label="Max follow-up questions" value={form.ai_max_questions ?? "10"} onChange={(v) => set("ai_max_questions", v)} type="number"
+                  <Field label="Max follow-up questions" value={form.ai_max_questions ?? "6"} onChange={(v) => set("ai_max_questions", v)} type="number"
                     hint="Iris stops asking and drafts once it hits this." />
                 </div>
               </div>

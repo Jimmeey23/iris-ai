@@ -50,6 +50,10 @@ export type IntakeData = {
   amount?: string;
   priorityOverride?: Priority;
   momenceContext?: MomenceContext;
+  /** Agent-discovered facts that no fixed slot covers. */
+  extraDetails?: Record<string, string>;
+  /** Additional problems the same report surfaced, kept with the primary ticket. */
+  secondaryIssues?: { title: string; category: string; subcategory: string; summary: string }[];
 };
 
 export type IntakeState = {
@@ -63,6 +67,11 @@ export type IntakeState = {
   plan?: SlotId[];
   planIndex?: number;
   asked?: string[];
+  /** Question ids the LLM agent has already put to this reporter. */
+  agentAsked?: string[];
+  pendingQuestionId?: string | null;
+  /** Insight computed once at draft time and reused on approval. */
+  insight?: AiInsight;
 };
 
 export type EngineInput = { value?: string; text?: string; context?: ComposerContext };
@@ -77,6 +86,10 @@ let counter = 0;
 function mid(): string {
   counter += 1;
   return `m${Date.now().toString(36)}${counter}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function assistantMessage(content: string, extra: Partial<ChatMessage> = {}): ChatMessage {
+  return assistant(content, extra);
 }
 
 function assistant(content: string, extra: Partial<ChatMessage> = {}): ChatMessage {
@@ -95,6 +108,8 @@ export function emptyState(): IntakeState {
     plan: [],
     planIndex: 0,
     asked: [],
+    agentAsked: [],
+    pendingQuestionId: null,
   };
 }
 
@@ -124,38 +139,15 @@ function followUps(category?: string, subcategory?: string): string[] {
 
 function applies(step: string, s: IntakeState): boolean {
   const d = s.data;
-  const f = followUps(d.category, d.subcategory);
   switch (step) {
     case "category": return !d.category;
     case "subcategory": return !d.subcategory;
     case "detail": return !d.rawText;
-    case "studio": return d.studioName === undefined;
-    case "raised_for": return !d.raisedFor;
-    case "member":
-      return d.raisedFor === "On behalf of a member" && d.memberName === undefined;
-    case "contact":
-      return (
-        d.raisedFor === "On behalf of a member" &&
-        !!d.memberName &&
-        d.memberName !== "Anonymous member" &&
-        !d.momenceMemberId &&
-        d.memberContact === undefined
-      );
-    case "trainer": return f.includes("trainer") && d.trainerName === undefined;
-    case "class": return f.includes("class") && d.classInfo === undefined;
-    case "location": return f.includes("location") && d.location === undefined;
-    case "system": return f.includes("system") && d.systemAffected === undefined;
-    case "membership": return f.includes("membership") && d.membershipRef === undefined;
-    case "risk": return f.includes("risk") && d.atRisk === undefined;
-    case "when": return d.occurredAt === undefined;
-    case "impact": return d.impact === undefined;
-    case "notes": return d.notes === undefined;
-    case "frequency": return d.frequency === undefined;
-    case "action_taken": return d.actionTaken === undefined;
-    case "witnesses": return d.witnesses === undefined;
-    case "amount": return d.amount === undefined;
     case "priority": return d.priorityOverride === undefined;
-    default: return true;
+    default: {
+      const slot = STEP_TO_SLOT[step];
+      return slot ? !knownSlots(d).has(slot) : true;
+    }
   }
 }
 
@@ -458,6 +450,7 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
 
   const ai =
     insight ??
+    s.insight ??
     localEnrich({
       text: raw,
       category,
@@ -473,7 +466,17 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
 
   const detailLines: string[] = [];
   if (d.rawText) detailLines.push(d.rawText.trim());
+  if (d.actionTaken && d.actionTaken !== "Nothing yet") {
+    detailLines.push(`Action already taken: ${d.actionTaken.trim()}`);
+  }
   if (d.notes) detailLines.push(`Additional notes: ${d.notes.trim()}`);
+  if (d.secondaryIssues?.length) {
+    detailLines.push(
+      ["Also surfaced by this report:", ...d.secondaryIssues.map((i) => `• ${i.title} — ${i.summary}`)].join(
+        "\n",
+      ),
+    );
+  }
 
   const details: Record<string, string> = {};
   if (d.trainerName && d.trainerName !== "Not identified") details["Trainer"] = d.trainerName;
@@ -491,6 +494,9 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   if (d.actionTaken) details["Action already taken"] = d.actionTaken;
   if (d.witnesses) details["Witnesses"] = d.witnesses;
   if (d.amount) details["Amount in dispute"] = d.amount;
+  for (const [label, value] of Object.entries(d.extraDetails ?? {})) {
+    if (value) details[label] = value;
+  }
 
   return {
     category,
@@ -1204,7 +1210,8 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
     };
   }
 
-  if (s.step === "subcategory" || s.step === "category") refreshPlan(s);
+  // Answers change what is still worth asking — never walk a stale plan.
+  refreshPlan(s);
 
   if (s.editingField) {
     if (s.editingField === "category" && !s.data.subcategory) {

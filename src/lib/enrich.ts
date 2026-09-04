@@ -2,6 +2,8 @@ import { classify, detectPriority, detectSentiment, suggestTags } from "./ai";
 import { CATEGORIES, TAXONOMY, type Priority } from "./taxonomy";
 import { computeSla, type Severity, type SlaOverrides } from "./sla";
 import { getOpenAiKey, getSetting } from "./settings";
+import { enforcePriority, enforceUrgency } from "./guardrails";
+import type { AgentInsight } from "./agent";
 
 /** Reads the admin-configured category-level SLA overrides, if any are saved. */
 export async function getSlaOverrides(): Promise<SlaOverrides | undefined> {
@@ -368,4 +370,90 @@ Return JSON with exactly these keys:
 /** Classify free text, optionally sharpened by the LLM. */
 export function quickClassify(text: string) {
   return classify(text, 4);
+}
+
+/* ------------------------------------------------------------------ */
+/* Agent-produced insight → canonical AiInsight                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Turn the intake agent's narrative judgement into the shape the ticket
+ * expects. Everything the agent is good at (title, root cause, action, tone)
+ * is taken as-is; everything that must be consistent and auditable (priority
+ * floor, urgency banding, SLA) is recomputed deterministically here.
+ *
+ * This is the single scorer — the draft preview and the raised ticket both
+ * come through this function, so they can never disagree.
+ */
+export async function insightFromAgent(input: {
+  agent?: AgentInsight;
+  text: string;
+  category: string;
+  subcategory: string;
+  impact?: string;
+  atRisk?: boolean;
+  studioName?: string;
+  memberName?: string;
+  trainerName?: string;
+  model?: string;
+}): Promise<AiInsight> {
+  const slaOverrides = await getSlaOverrides();
+  const base = localEnrich({ ...input, slaOverrides });
+  const a = input.agent;
+  if (!a) return base;
+
+  const sentiment = (["Positive", "Neutral", "Negative", "Escalated"] as const).includes(
+    a.sentiment as never,
+  )
+    ? (a.sentiment as AiInsight["sentiment"])
+    : base.sentiment;
+
+  const { priority, reason } = enforcePriority(a.priority, input.text, a.priorityReason);
+  const urgencyScore = enforceUrgency(a.urgencyScore, priority);
+
+  const churnRisk = (["Low", "Medium", "High"] as const).includes(a.churnRisk as never)
+    ? (a.churnRisk as AiInsight["churnRisk"])
+    : base.churnRisk;
+  const effort = (["Low", "Medium", "High"] as const).includes(a.effort as never)
+    ? (a.effort as AiInsight["effort"])
+    : base.effort;
+
+  const sla = computeSla({
+    category: input.category,
+    subcategory: input.subcategory,
+    urgencyScore,
+    churnRisk,
+    sentiment,
+    impact: input.impact,
+    atRisk: input.atRisk,
+    overrides: slaOverrides,
+  });
+
+  // SLA may only escalate priority further, never soften the guardrail floor.
+  const order: Priority[] = ["Low", "Medium", "High", "Critical"];
+  const finalPriority = order[Math.max(order.indexOf(priority), order.indexOf(sla.priority))];
+
+  return {
+    title: (a.title?.trim() || base.title).slice(0, 140),
+    summary: a.summary?.trim() || base.summary,
+    sentiment,
+    emotion: a.emotion?.trim() || base.emotion,
+    urgencyScore,
+    churnRisk,
+    effort,
+    rootCause: a.rootCause?.trim() || base.rootCause,
+    suggestedAction: a.suggestedAction?.trim() || base.suggestedAction,
+    priority: finalPriority,
+    priorityReason: [reason, sla.reason].filter(Boolean).join(" · "),
+    tags: Array.isArray(a.tags) && a.tags.length ? a.tags.slice(0, 6) : base.tags,
+    confidence: 92,
+    engine: input.model ? `Iris Agent (${input.model})` : "Iris Agent",
+    category: input.category,
+    subcategory: input.subcategory,
+    severity: sla.severity,
+    slaRespondHours: sla.respondHours,
+    slaResolveHours: sla.resolveHours,
+    slaPolicy: sla.policyLabel,
+    slaReason: sla.reason,
+  };
 }

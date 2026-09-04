@@ -48,6 +48,8 @@ const WHEN_PATTERNS: { re: RegExp; value: string }[] = [
   { re: /\b(this week|earlier this week|couple of days ago|two days ago|last few days)\b/i, value: "Earlier this week" },
   { re: /\b(every day|daily|ongoing|recurring|again and again|keeps happening|for \d+ (days|weeks)|since last week|repeatedly|every class)\b/i, value: "Ongoing / recurring" },
   { re: /\blast (week|month)\b/i, value: "Earlier this week" },
+  // Bare clock times with no day marker read as today on a studio floor.
+  { re: /\b\d{1,2}[.:]?\d{0,2}\s?(am|pm)\b/i, value: "Earlier today" },
 ];
 
 const RAISED_FOR_PATTERNS: { re: RegExp; value: string }[] = [
@@ -181,13 +183,23 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
     }
   }
   if (d.classInfo === undefined) {
-    const time = text.match(MEMBER_TIME_RE);
-    const format = CLASS_FORMATS.find(
+    // A single report often spans several classes — keep all of them.
+    const times = [...text.matchAll(/\b(\d{1,2}[.:]?\d{0,2}\s?(?:am|pm))\b/gi)].map((m) =>
+      m[1].toUpperCase().replace(/\s+/g, " "),
+    );
+    const formats = CLASS_FORMATS.filter(
       (f) => f !== "Not class specific" && text.toLowerCase().includes(f.toLowerCase()),
     );
-    if (time || format) {
-      const value = [time?.[1]?.toUpperCase(), format].filter(Boolean).join(" ");
-      d.classInfo = value || format || `${time?.[1]} class`;
+    const legacyTime = text.match(MEMBER_TIME_RE)?.[1];
+    const uniqueTimes = [...new Set(times.length ? times : legacyTime ? [legacyTime.toUpperCase()] : [])];
+    if (uniqueTimes.length || formats.length) {
+      const value =
+        uniqueTimes.length && formats.length
+          ? `${uniqueTimes.join(", ")} (${formats.join(", ")})`
+          : uniqueTimes.length
+            ? uniqueTimes.join(", ")
+            : formats.join(", ");
+      d.classInfo = value;
       note(`Class · ${d.classInfo}`);
     }
   }

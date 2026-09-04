@@ -1,10 +1,20 @@
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
 import { appSettings } from "@/db/schema";
+
+/**
+ * The database is loaded lazily so settings — and therefore the whole LLM
+ * layer — can be used in contexts with no DATABASE_URL, such as the eval
+ * harness and one-off scripts.
+ */
+async function database() {
+  const mod = await import("@/db");
+  return mod.db;
+}
 
 export const SETTING_KEYS = [
   "openai_api_key",
   "openai_model",
+  "openai_model_fast",
   "momence_client_id",
   "momence_client_secret",
   "momence_username",
@@ -15,6 +25,7 @@ export type SettingKey = (typeof SETTING_KEYS)[number];
 
 export async function getSetting(key: SettingKey | string): Promise<string> {
   try {
+    const db = await database();
     const [row] = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
     return row?.value ?? "";
   } catch {
@@ -24,6 +35,7 @@ export async function getSetting(key: SettingKey | string): Promise<string> {
 
 export async function getSettings(): Promise<Record<string, string>> {
   try {
+    const db = await database();
     const rows = await db.select().from(appSettings);
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   } catch {
@@ -32,6 +44,7 @@ export async function getSettings(): Promise<Record<string, string>> {
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
+  const db = await database();
   await db
     .insert(appSettings)
     .values({ key, value, updatedAt: new Date() })

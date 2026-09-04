@@ -103,6 +103,7 @@ export const TAXONOMY: Record<string, string[]> = {
     "Too Many Corrections vs. Too Few",
   ],
   "Repair and Maintenance": [
+    "Power Outage / Utility Failure",
     "AC and HVAC Issues",
     "TFA Malfunction",
     "Lighting Issues",
@@ -192,6 +193,9 @@ export const TAXONOMY: Record<string, string[]> = {
     "Studio Wi-Fi Not Working",
   ],
   "Pricing and Memberships": [
+    "Duplicate or Double Charge",
+    "Incorrect Amount Charged",
+    "Refund Request",
     "Price Transparency",
     "Membership Flexibility",
     "Discounts and Offers Confusion",
@@ -447,6 +451,22 @@ export const CATEGORIES = Object.keys(TAXONOMY);
 
 /** Extra vocabulary that helps the classifier map natural language to a subcategory. */
 export const SUBCATEGORY_HINTS: Record<string, string[]> = {
+  "Pricing and Memberships::Duplicate or Double Charge": [
+    "charged twice", "double charge", "duplicate charge", "billed twice", "two payments",
+    "deducted twice", "same amount twice",
+  ],
+  "Pricing and Memberships::Incorrect Amount Charged": [
+    "wrong amount", "overcharged", "charged more", "incorrect charge", "billing error",
+    "charged the wrong price",
+  ],
+  "Pricing and Memberships::Refund Request": [
+    "refund", "wants her money back", "reverse the payment", "money returned", "chargeback",
+  ],
+  "Repair and Maintenance::Power Outage / Utility Failure": [
+    "no electricity", "power cut", "power outage", "power failure", "no power", "blackout",
+    "load shedding", "generator", "inverter", "fuse", "short circuit", "mains", "no water supply",
+    "electricity went", "lights and ac off",
+  ],
   "Repair and Maintenance::AC and HVAC Issues": [
     "ac", "air conditioner", "aircon", "hvac", "cooling", "not cooling", "heater", "chiller",
   ],
