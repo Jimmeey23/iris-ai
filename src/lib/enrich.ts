@@ -396,6 +396,7 @@ export async function insightFromAgent(input: {
   memberName?: string;
   trainerName?: string;
   model?: string;
+  confidence?: number;
 }): Promise<AiInsight> {
   const slaOverrides = await getSlaOverrides();
   const base = localEnrich({ ...input, slaOverrides });
@@ -449,7 +450,7 @@ export async function insightFromAgent(input: {
     priority: finalPriority,
     priorityReason: [reason, sla.reason].filter(Boolean).join(" · "),
     tags: Array.isArray(a.tags) && a.tags.length ? a.tags.slice(0, 6) : base.tags,
-    confidence: 92,
+    confidence: Math.max(0, Math.min(100, Math.round((input.confidence ?? 0.6) * 100))),
     engine: input.model ? `Iris Agent (${input.model})` : "Iris Agent",
     category: input.category,
     subcategory: input.subcategory,

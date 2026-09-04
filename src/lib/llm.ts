@@ -37,7 +37,24 @@ export type LlmCall = {
   timeoutMs?: number;
   /** Retried once on transport failure or unparseable JSON. */
   retries?: number;
+  /** Strict JSON Schema for model output. Falls back to JSON object mode when omitted. */
+  responseSchema?: { name: string; schema: Record<string, unknown> };
 };
+
+function responseFormat(call: LlmCall): Record<string, unknown> {
+  if (!call.responseSchema) return { type: "json_object" };
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: call.responseSchema.name,
+      // Some agent fields intentionally use dynamic keys (slots and extra
+      // details), so the schema guides generation while runtime validation
+      // below remains the final authority.
+      strict: false,
+      schema: call.responseSchema.schema,
+    },
+  };
+}
 
 export type LlmResult<T> = {
   ok: boolean;
@@ -76,7 +93,7 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
           model,
           temperature: call.temperature ?? 0.2,
           max_tokens: call.maxTokens ?? 1400,
-          response_format: { type: "json_object" },
+          response_format: responseFormat(call),
           messages: [
             { role: "system", content: call.system },
             { role: "user", content: call.user },
@@ -197,7 +214,7 @@ export async function chatJsonStreaming<T>(call: StreamingCall): Promise<LlmResu
         model,
         temperature: call.temperature ?? 0.2,
         max_tokens: call.maxTokens ?? 1400,
-        response_format: { type: "json_object" },
+        response_format: responseFormat(call),
         stream: true,
         messages: [
           { role: "system", content: call.system },

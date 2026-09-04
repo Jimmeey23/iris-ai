@@ -3,13 +3,11 @@ import { db } from "@/db";
 import { chatSessions } from "@/db/schema";
 import { getStudios, createTicketBundle } from "@/lib/tickets";
 import { aiEnrich } from "@/lib/enrich";
-import { llmAvailable } from "@/lib/llm";
 import { runAgentTurn, type AgentTurnResult, type TurnHooks } from "@/lib/agent-session";
 import {
   buildDraft,
   createdMessage,
   emptyState,
-  handleInput,
   reviewMessage,
   startSession,
   type EngineContext,
@@ -40,6 +38,9 @@ export type ChatTurnResponse = {
   step: string;
   capture: Record<string, unknown>;
   createdTicketId: number | null;
+  mode: "agent" | "deterministic" | "unavailable";
+  model?: string;
+  degradation?: string;
 };
 
 async function buildContext(reporter?: { name?: string; role?: string }): Promise<EngineContext> {
@@ -87,6 +88,9 @@ export async function runChatTurn(
   }
 
   let messages: ChatMessage[] = [];
+  let responseMode: ChatTurnResponse["mode"] = "deterministic";
+  let responseModel: string | undefined;
+  let responseDegradation: string | undefined;
 
   if (!existing || body.reset) {
     const started = startSession(ctx);
@@ -107,12 +111,12 @@ export async function runChatTurn(
     // The LLM agent drives intake whenever a key is configured; the on-device
     // engine stays as the offline fallback and is used automatically if the
     // model call fails.
-    const agentMode = await llmAvailable();
-    const result = agentMode
-      ? await runAgentTurn(state, transcript, input, ctx, hooks)
-      : handleInput(state, input, ctx);
+    const result = await runAgentTurn(state, transcript, input, ctx, hooks);
     const agentResult = result as Partial<AgentTurnResult>;
     const usedAgent = agentResult.usedAgent === true;
+    responseMode = agentResult.degraded ? "unavailable" : usedAgent ? "agent" : "deterministic";
+    responseModel = agentResult.model;
+    responseDegradation = agentResult.degraded;
 
     // Record the reporter's turn in their own words. In agent mode that includes
     // option and picker clicks, which the agent must be able to re-read.
@@ -245,5 +249,8 @@ export async function runChatTurn(
     step: state.step,
     capture: state.data,
     createdTicketId: state.createdTicketId,
+    mode: responseMode,
+    model: responseModel,
+    degradation: responseDegradation,
   };
 }

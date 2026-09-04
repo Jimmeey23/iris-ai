@@ -344,6 +344,7 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const [busy, setBusy] = useState(false);
   const [partial, setPartial] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [agentMode, setAgentMode] = useState<"agent" | "deterministic" | "unavailable">("agent");
   const [capture, setCapture] = useState<Record<string, unknown>>({});
   const [step, setStep] = useState("describe");
   const [context, setContext] = useState<ComposerContext>({});
@@ -387,12 +388,15 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
         messages: ChatMessage[];
         step: string;
         capture: Record<string, unknown>;
+        mode: "agent" | "deterministic" | "unavailable";
+        model?: string;
       };
 
       const apply = (data: TurnResult) => {
         setSessionId(data.sessionId);
         setStep(data.step);
         setCapture(data.capture ?? {});
+        setAgentMode(data.mode ?? "agent");
         if (payload.reset) {
           setMessages(data.messages);
           setContext({});
@@ -582,7 +586,9 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
           <div className="min-w-0 leading-tight">
             <div className="flex items-center gap-1.5 text-[13.5px] font-semibold txt">
               Iris
-              <span className="chip mint-soft !px-1.5 !py-0 !text-[9px]">online</span>
+              <span title="The server reports how this turn was produced" className={`chip !px-1.5 !py-0 !text-[9px] ${agentMode === "unavailable" ? "amber-soft" : "mint-soft"}`}>
+                {agentMode === "unavailable" ? "reasoning unavailable" : agentMode === "deterministic" ? "review mode" : "AI reasoning"}
+              </span>
               {remaining > 0 && (
                 <span className="chip accent-soft !px-1.5 !py-0 !text-[9px]">{remaining} left</span>
               )}

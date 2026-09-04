@@ -72,6 +72,12 @@ export type AgentTurn = {
   toolCalls?: ToolCall[];
 };
 
+export function isCoherentAgentTurn(turn: AgentTurn): boolean {
+  const hasQuestion = Boolean(turn.nextQuestion?.ask);
+  const hasTools = Boolean(turn.toolCalls?.length);
+  return turn.readyForDraft ? !hasQuestion && !hasTools : hasQuestion || hasTools;
+}
+
 export type AgentContext = {
   reporter: { name: string; role: string };
   studios: { id: number; name: string; city: string; isHq: boolean }[];
@@ -89,6 +95,45 @@ export type AgentContext = {
   /** Lookups already run this session, with their results. */
   toolResults?: ToolResult[];
 };
+
+const AGENT_RESPONSE_SCHEMA = {
+  name: "iris_intake_turn",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["reply", "classification", "slots", "secondaryIssues", "extraDetails", "nextQuestion", "toolCalls", "readyForDraft", "insight"],
+    properties: {
+      reply: { type: "string" },
+      classification: {
+        type: "object", additionalProperties: false,
+        required: ["category", "subcategory", "confidence", "reason", "alternates"],
+        properties: {
+          category: { type: "string" }, subcategory: { type: "string" },
+          confidence: { type: "number", minimum: 0, maximum: 1 }, reason: { type: "string" },
+          alternates: { type: "array", maxItems: 2, items: { type: "object", additionalProperties: false, required: ["category", "subcategory"], properties: { category: { type: "string" }, subcategory: { type: "string" } } } },
+        },
+      },
+      slots: { type: "object", additionalProperties: { type: "object", additionalProperties: false, required: ["value", "quote"], properties: { value: { type: ["string", "boolean", "null"] }, quote: { type: ["string", "null"] } } } },
+      secondaryIssues: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["title", "category", "subcategory", "summary"], properties: { title: { type: "string" }, category: { type: "string" }, subcategory: { type: "string" }, summary: { type: "string" } } } },
+      extraDetails: { type: "object", additionalProperties: { type: "string" } },
+      nextQuestion: {
+        anyOf: [
+          { type: "null" },
+          { type: "object", additionalProperties: false, required: ["id", "ask", "why", "options", "allowFreeText", "placeholder", "picker", "skipLabel"], properties: {
+            id: { type: "string" }, ask: { type: "string" }, why: { type: ["string", "null"] },
+            options: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false, required: ["label", "value"], properties: { label: { type: "string" }, value: { type: "string" } } } },
+            allowFreeText: { type: "boolean" }, placeholder: { type: ["string", "null"] },
+            picker: { anyOf: [{ type: "null" }, { type: "string", enum: ["member", "session", "trainer", "studio", "membership"] }] },
+            skipLabel: { type: ["string", "null"] },
+          } },
+        ],
+      },
+      toolCalls: { type: "array", maxItems: 3, items: { type: "object", additionalProperties: false, required: ["tool", "args"], properties: { tool: { type: "string", enum: ["search_member", "member_context", "find_sessions", "session_attendees"] }, args: { type: "object", additionalProperties: true } } } },
+      readyForDraft: { type: "boolean" },
+      insight: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: true }] },
+    },
+  },
+} as const;
 
 /* ------------------------------------------------------------------ */
 /* Prompt                                                              */
@@ -260,6 +305,9 @@ STUDIOS: ${studioList}
 
 REPORTER: ${ctx.reporter.name}, ${ctx.reporter.role}
 
+CURRENT DATE AND TIME: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "full", timeStyle: "short" })} IST
+Resolve words such as today, yesterday, this morning and last night against this timestamp.
+
 ALREADY KNOWN (do not ask about any of these):
 ${knownLines || "- nothing yet"}
 
@@ -292,6 +340,7 @@ Produce the JSON for this turn.`;
     maxTokens: 1600,
     timeoutMs: 45000,
     retries: 1,
+    responseSchema: AGENT_RESPONSE_SCHEMA,
   };
 
   const res = opts.onReplyDelta
@@ -300,6 +349,10 @@ Produce the JSON for this turn.`;
 
   if (!res.ok || !res.data) {
     return { ok: false, error: res.error, latencyMs: res.latencyMs, model: res.model };
+  }
+
+  if (!isCoherentAgentTurn(res.data)) {
+    return { ok: false, error: "incoherent-agent-turn", latencyMs: res.latencyMs, model: res.model };
   }
 
   return {
@@ -365,7 +418,7 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
     .slice(0, 3);
 
   // A lookup turn is neither a question nor a draft — it is a pause for facts.
-  const readyForDraft = toolCalls.length ? false : raw.readyForDraft === true || !nextQuestion;
+  const readyForDraft = toolCalls.length ? false : raw.readyForDraft === true && !nextQuestion;
 
   return {
     reply: tidyReply(raw.reply, "Got it."),

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { runChatTurn } from "../chat-service";
 import { momenceAvailable } from "../agent-tools";
 import { listSessions } from "../momence";
 
@@ -15,6 +14,9 @@ const READY = !!process.env.DATABASE_URL && (process.env.OPENAI_API_KEY ?? "").s
 
 describe.skipIf(!READY)("session resolution", () => {
   it("attaches the real Momence session for a class the reporter names", async () => {
+    // Keep the database-backed production service out of the module graph when
+    // this credentialed live eval is skipped.
+    const { runChatTurn } = await import("../chat-service");
     if (!(await momenceAvailable())) {
       console.warn("Momence not connected — skipping.");
       return;

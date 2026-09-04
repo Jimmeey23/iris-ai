@@ -161,6 +161,7 @@ function applySlots(
   slots: Record<string, { value: string | boolean | null }>,
   s: IntakeState,
   ctx: EngineContext,
+  allowOverwrite = false,
 ): void {
   const d = s.data;
   for (const [slot, entry] of Object.entries(slots)) {
@@ -170,7 +171,7 @@ function applySlots(
 
     switch (slot) {
       case "studio": {
-        if (d.studioName !== undefined) break; // an explicit pick always wins
+        if (d.studioName !== undefined && !allowOverwrite) break; // explicit context wins unless corrected
         const match = resolveStudio(str, ctx.studios);
         if (match) {
           d.studioId = match.id;
@@ -187,7 +188,12 @@ function applySlots(
       case "trainer": d.trainerName = str; break;
       case "classInfo": {
         // A session resolved against Momence outranks the reporter's shorthand.
-        if (d.momenceSessionId && d.classInfo) break;
+        if (d.momenceSessionId && d.classInfo && !allowOverwrite) break;
+        if (allowOverwrite) {
+          d.momenceSessionId = undefined;
+          d.momenceContext = undefined;
+          s.autoLookupDone = false;
+        }
         d.classInfo = str;
         break;
       }
@@ -395,6 +401,7 @@ function analysisChips(s: IntakeState, confidence: number): ChatMessage["analysi
 export type AgentTurnResult = EngineResult & {
   usedAgent: boolean;
   degraded?: string;
+  model?: string;
   /**
    * The reporter's turn as plain words — including option and picker clicks —
    * so the caller can persist a transcript the agent can re-read next turn.
@@ -504,11 +511,23 @@ export async function runAgentTurn(
   hooks.onReplyRestart?.();
   let result = await runAgent(convo, agentCtx, { onReplyDelta: hooks.onReplyDelta });
 
-  // Model unavailable or malformed — fall back to the on-device engine so
-  // intake never dead-ends.
+  // Never disguise a rules questionnaire as AI. Preserve the reporter's words
+  // and make a transient/configuration failure explicit so the turn can retry.
   if (!result.ok || !result.turn) {
-    const legacy = handleInput(state, input, ctx);
-    return { ...legacy, usedAgent: false, degraded: result.error };
+    s.step = "agent_unavailable";
+    return {
+      state: s,
+      usedAgent: true,
+      userUtterance: utterance,
+      degraded: result.error ?? "agent-unavailable",
+      model: result.model,
+      messages: [
+        assistantMessage(
+          "I’ve kept everything you shared, but I couldn’t complete the reasoning pass. Retry when the AI connection is available — I won’t replace it with a scripted questionnaire.",
+          { options: [{ label: "Retry reasoning", value: "retry", tone: "primary" }], allowFreeText: true },
+        ),
+      ],
+    };
   }
 
   // Momence lookup loop. The agent asks for facts, we fetch them, it continues.
@@ -582,7 +601,8 @@ export async function runAgentTurn(
     s.data.category = turn.classification.category;
     s.data.subcategory = turn.classification.subcategory;
   }
-  applySlots(turn.slots, s, ctx);
+  const isCorrection = /\b(actually|correction|correct that|i meant|rather than|not .+[,;] (?:it(?:'s| is)|the)|scratch that)\b/i.test(utterance);
+  applySlots(turn.slots, s, ctx, isCorrection);
   if (turn.extraDetails && Object.keys(turn.extraDetails).length) {
     s.data.extraDetails = { ...(s.data.extraDetails ?? {}), ...turn.extraDetails };
   }
@@ -648,7 +668,7 @@ export async function runAgentTurn(
     } else {
       messages.push(questionMessage(question, turn.reply, s, ctx, inferred, budget));
     }
-    return { state: s, messages, usedAgent: true, userUtterance: utterance };
+    return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 
   // Ready for the draft. If the studio was never established, say so on the
@@ -670,6 +690,7 @@ export async function runAgentTurn(
     memberName: s.data.memberName,
     trainerName: s.data.trainerName,
     model: result.model,
+    confidence: turn.classification.confidence,
   });
 
   s.step = "review";
@@ -686,7 +707,7 @@ export async function runAgentTurn(
     );
   }
   messages.push(reviewMessage(s, ctx, insight));
-  return { state: s, messages, usedAgent: true, userUtterance: utterance };
+  return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
 }
 
 export { buildDraft };
