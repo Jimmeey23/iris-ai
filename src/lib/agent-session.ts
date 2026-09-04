@@ -16,6 +16,7 @@ import { runAgent, questionOptions, type AgentContext, type AgentQuestion } from
 import { missingRequired, questionBudget } from "./guardrails";
 import { insightFromAgent } from "./enrich";
 import { findRelatedTickets } from "./recurrence";
+import { contextFromResults, momenceAvailable, runTools, type ToolResult } from "./agent-tools";
 import type { ChatMessage, ChatOption } from "./types";
 
 /** Steps owned by the deterministic review / edit machinery, not the agent. */
@@ -122,6 +123,40 @@ function absorbInput(
 /* Agent slots → intake data                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Match whatever the agent called the studio against the real studio list.
+ *
+ * Staff and models both write the locality only — "Kemps Corner", "Bandra",
+ * "Kemps Corner (Mumbai)" — while the record is "Kwality House, Kemps Corner".
+ * Compare on distinctive words rather than on the whole string.
+ */
+export function resolveStudio(
+  value: string,
+  studios: EngineContext["studios"],
+): EngineContext["studios"][number] | null {
+  const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  const said = norm(value);
+  if (!said) return null;
+
+  const generic = new Set(["mumbai", "bengaluru", "bangalore", "india", "studio", "house", "hq", "centre", "center", "the", "supreme", "support"]);
+  const saidWords = new Set(said.split(" ").filter((w) => w.length > 2 && !generic.has(w)));
+
+  let best: { studio: EngineContext["studios"][number]; score: number } | null = null;
+  for (const studio of studios) {
+    const name = norm(studio.name);
+    let score = 0;
+    if (said === name) score = 100;
+    else if (said.includes(name) || name.includes(said)) score = 50;
+    if (norm(studio.code) === said) score = Math.max(score, 90);
+
+    for (const word of name.split(" ")) {
+      if (word.length > 2 && !generic.has(word) && saidWords.has(word)) score += 10;
+    }
+    if (score > 0 && (!best || score > best.score)) best = { studio, score };
+  }
+  return best && best.score >= 10 ? best.studio : null;
+}
+
 function applySlots(
   slots: Record<string, { value: string | boolean | null }>,
   s: IntakeState,
@@ -136,11 +171,7 @@ function applySlots(
     switch (slot) {
       case "studio": {
         if (d.studioName !== undefined) break; // an explicit pick always wins
-        const match = ctx.studios.find(
-          (st) =>
-            str.toLowerCase().includes(st.name.toLowerCase()) ||
-            st.name.toLowerCase().includes(str.toLowerCase().split(",")[0].trim()),
-        );
+        const match = resolveStudio(str, ctx.studios);
         if (match) {
           d.studioId = match.id;
           d.studioName = `${match.name}, ${match.city}`;
@@ -155,7 +186,12 @@ function applySlots(
       case "memberContact": d.memberContact = str; break;
       case "trainer": d.trainerName = str; break;
       case "classInfo": d.classInfo = str; break;
-      case "location": d.location = str; break;
+      case "location": {
+        // The studio itself is not an area within the studio.
+        if (resolveStudio(str, ctx.studios)) break;
+        d.location = str;
+        break;
+      }
       case "systemAffected": d.systemAffected = str; break;
       case "membershipRef": d.membershipRef = str; break;
       case "occurredAt": d.occurredAt = str; break;
@@ -267,11 +303,24 @@ export type AgentTurnResult = EngineResult & {
   userUtterance?: string;
 };
 
+export type TurnHooks = {
+  /** Progress notes for a streaming client: what the agent is doing right now. */
+  onStatus?: (status: string) => void;
+  /** Slices of the agent's reply, as it is written. */
+  onReplyDelta?: (text: string) => void;
+  /**
+   * Fired before each model call. A turn that pauses for a Momence lookup calls
+   * the model twice, so the client must discard the first partial reply.
+   */
+  onReplyRestart?: () => void;
+};
+
 export async function runAgentTurn(
   state: IntakeState,
   transcript: ChatMessage[],
   input: EngineInput,
   ctx: EngineContext,
+  hooks: TurnHooks = {},
 ): Promise<AgentTurnResult> {
   if (input.value === "restart") {
     const fresh = startSession(ctx);
@@ -325,11 +374,15 @@ export async function runAgentTurn(
 
   const budget = await questionBudget();
 
+  hooks.onStatus?.("Checking for related tickets");
   const related = await findRelatedTickets({
     text: narrative,
     studioId: s.data.studioId,
     category: s.data.category,
   }).catch(() => []);
+
+  const toolsEnabled = await momenceAvailable().catch(() => false);
+  const toolResults: ToolResult[] = [...(s.toolResults ?? [])];
 
   const agentCtx: AgentContext = {
     reporter: ctx.reporter,
@@ -344,9 +397,13 @@ export async function runAgentTurn(
       status: r.status,
     })),
     momenceNote: s.data.momenceContext ? JSON.stringify(s.data.momenceContext) : undefined,
+    toolsEnabled,
+    toolResults,
   };
 
-  const result = await runAgent(convo, agentCtx);
+  hooks.onStatus?.("Reading your report");
+  hooks.onReplyRestart?.();
+  let result = await runAgent(convo, agentCtx, { onReplyDelta: hooks.onReplyDelta });
 
   // Model unavailable or malformed — fall back to the on-device engine so
   // intake never dead-ends.
@@ -355,7 +412,32 @@ export async function runAgentTurn(
     return { ...legacy, usedAgent: false, degraded: result.error };
   }
 
-  const turn = result.turn;
+  // Momence lookup loop. The agent asks for facts, we fetch them, it continues.
+  // Capped so a confused model cannot spin, and every result is remembered on
+  // the session so the same lookup is never paid for twice.
+  const TOOL_ROUNDS = 2;
+  for (let round = 0; round < TOOL_ROUNDS; round++) {
+    const calls = result.turn?.toolCalls ?? [];
+    if (!calls.length) break;
+    hooks.onStatus?.(`Looking up ${calls.map((c) => c.tool.replace(/_/g, " ")).join(", ")} in Momence`);
+    const fresh = await runTools(calls);
+    toolResults.push(...fresh);
+    const momence = contextFromResults(toolResults);
+    if (momence) s.data.momenceContext = { ...(s.data.momenceContext ?? {}), ...momence };
+    hooks.onReplyRestart?.();
+    const next = await runAgent(
+      convo,
+      { ...agentCtx, known: knownForAgent(s), toolResults },
+      { onReplyDelta: hooks.onReplyDelta },
+    );
+    if (!next.ok || !next.turn) break;
+    result = next;
+  }
+  s.toolResults = toolResults;
+
+  const turn = result.turn!;
+  // A model that keeps asking for lookups past the cap must still move on.
+  if (turn.toolCalls?.length) turn.toolCalls = [];
   if (!s.data.category || turn.classification.confidence >= 0.5) {
     s.data.category = turn.classification.category;
     s.data.subcategory = turn.classification.subcategory;
@@ -436,6 +518,7 @@ export async function runAgentTurn(
     s.data.studioName = "Not studio specific";
   }
 
+  hooks.onStatus?.("Building the draft");
   const insight = await insightFromAgent({
     agent: turn.insight,
     text: narrative,

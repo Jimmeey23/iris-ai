@@ -23,7 +23,7 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
       >
         ← Back to all tickets
       </Link>
-      <TicketWorkspace ticket={data.ticket} events={data.events} staff={staff} />
+      <TicketWorkspace ticket={data.ticket} events={data.events} staff={staff} linked={data.linked} />
     </div>
   );
 }

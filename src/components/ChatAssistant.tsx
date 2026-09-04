@@ -11,7 +11,7 @@ import { Avatar, CategoryChip, PriorityPill } from "./ui";
 import { useEscape } from "@/lib/use-escape";
 import { download, toHtml, toJson, toMarkdown, toPdf, toPlainText, toPng } from "@/lib/chat-export";
 import type { ChatMessage, ChatOption, ComposerContext, TicketDraft } from "@/lib/types";
-import { apiPost } from "@/lib/api-client";
+import { apiPost, apiPostStream } from "@/lib/api-client";
 
 function Rich({ text }: { text: string }) {
   return (
@@ -125,6 +125,28 @@ export function DraftCard({ draft }: { draft: TicketDraft }) {
             <p className="whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-[12.5px] leading-relaxed txt-2" style={{ background: "var(--surface-3)" }}>
               {draft.description}
             </p>
+          </section>
+        )}
+
+        {(draft.secondaryIssues?.length ?? 0) > 0 && (
+          <section>
+            <div className="mb-1.5 text-[8.5px] font-semibold uppercase tracking-[0.2em] txt-3">
+              Also raised as linked tickets
+            </div>
+            <ul className="space-y-1.5">
+              {draft.secondaryIssues!.map((issue) => (
+                <li
+                  key={issue.title}
+                  className="rounded-2xl px-3.5 py-2.5"
+                  style={{ background: "var(--surface-3)" }}
+                >
+                  <div className="text-[12px] font-medium txt">{issue.title}</div>
+                  <div className="mt-0.5 text-[11px] txt-3">
+                    {issue.category} › {issue.subcategory}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 
@@ -320,6 +342,8 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [partial, setPartial] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
   const [capture, setCapture] = useState<Record<string, unknown>>({});
   const [step, setStep] = useState("describe");
   const [context, setContext] = useState<ComposerContext>({});
@@ -341,6 +365,8 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const send = useCallback(
     async (payload: { value?: string; text?: string; label?: string; reset?: boolean }) => {
       setBusy(true);
+      setPartial("");
+      setStatus(null);
       const echo = payload.text ?? (payload.label && payload.value !== "showall" ? payload.label : null);
       if (echo) {
         setMessages((prev) => [
@@ -348,18 +374,22 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
           { id: `l${Date.now()}`, role: "user", content: echo, createdAt: new Date().toISOString() },
         ]);
       }
-      try {
-        const data = await apiPost<{
-          sessionId: string;
-          messages: ChatMessage[];
-          step: string;
-          capture: Record<string, unknown>;
-        }>("/api/chat", {
-          sessionId: payload.reset ? null : sessionId,
-          input: { value: payload.value, text: payload.text, context },
-          reporter: { name: user.name, role: `${user.role}, ${user.studio}` },
-          reset: payload.reset,
-        });
+
+      const request = {
+        sessionId: payload.reset ? null : sessionId,
+        input: { value: payload.value, text: payload.text, context },
+        reporter: { name: user.name, role: `${user.role}, ${user.studio}` },
+        reset: payload.reset,
+      };
+
+      type TurnResult = {
+        sessionId: string;
+        messages: ChatMessage[];
+        step: string;
+        capture: Record<string, unknown>;
+      };
+
+      const apply = (data: TurnResult) => {
         setSessionId(data.sessionId);
         setStep(data.step);
         setCapture(data.capture ?? {});
@@ -367,6 +397,47 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
           setMessages(data.messages);
           setContext({});
         } else setMessages((prev) => [...prev, ...data.messages]);
+      };
+
+      // Raising the ticket is not idempotent, so it never goes over the stream —
+      // a dropped connection there could create the ticket twice.
+      const streamable = payload.value !== "approve";
+
+      try {
+        let result: TurnResult | null = null;
+        let sawServer = false;
+        if (streamable) {
+          try {
+            await apiPostStream("/api/chat/stream", request, {
+              status: (d) => {
+                sawServer = true;
+                setStatus((d as { status?: string }).status ?? null);
+              },
+              reply_reset: () => setPartial(""),
+              reply: (d) => {
+                sawServer = true;
+                setPartial((prev) => prev + ((d as { text?: string }).text ?? ""));
+              },
+              done: (d) => {
+                sawServer = true;
+                result = d as TurnResult;
+              },
+              error: () => {
+                sawServer = true;
+              },
+            });
+          } catch {
+            // Fall through to the decision below.
+          }
+        }
+
+        // Retry over plain JSON only when the stream never reached the server.
+        // A stream that started and then died may have already done the work.
+        if (!result && (!sawServer || !streamable)) {
+          result = await apiPost<TurnResult>("/api/chat", request);
+        }
+        if (!result) throw new Error("stream ended without a result");
+        apply(result);
       } catch {
         setMessages((prev) => [
           ...prev,
@@ -378,6 +449,8 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
           },
         ]);
       } finally {
+        setPartial("");
+        setStatus(null);
         setBusy(false);
       }
     },
@@ -668,17 +741,33 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
               <span className="grad-accent mt-0.5 flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full text-[11px] text-white">
                 ✦
               </span>
-              <div
-                className="flex items-center gap-1 rounded-2xl rounded-tl-md px-3.5 py-2.5"
-                style={{ background: "var(--surface)", boxShadow: "inset 0 0 0 1px var(--line)" }}
-              >
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="dot-blink h-1.5 w-1.5 rounded-full"
-                    style={{ background: "var(--accent)", animationDelay: `${i * 0.15}s` }}
-                  />
-                ))}
+              <div className="min-w-0 space-y-1.5">
+                {partial ? (
+                  /* Iris's reply as it is being written. */
+                  <div
+                    className="rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13px] leading-relaxed txt"
+                    style={{ background: "var(--surface)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+                  >
+                    {partial}
+                    <span className="caret-blink ml-0.5 inline-block h-[13px] w-[2px] translate-y-[2px] rounded-full" style={{ background: "var(--accent)" }} />
+                  </div>
+                ) : (
+                  <div
+                    className="flex w-fit items-center gap-1 rounded-2xl rounded-tl-md px-3.5 py-2.5"
+                    style={{ background: "var(--surface)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+                  >
+                    {[0, 1, 2].map((i) => (
+                      <span
+                        key={i}
+                        className="dot-blink h-1.5 w-1.5 rounded-full"
+                        style={{ background: "var(--accent)", animationDelay: `${i * 0.15}s` }}
+                      />
+                    ))}
+                  </div>
+                )}
+                {status && (
+                  <div className="pl-1 text-[10.5px] txt-3">{status}…</div>
+                )}
               </div>
             </div>
           )}

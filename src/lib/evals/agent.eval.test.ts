@@ -39,7 +39,8 @@ type RunOutcome = {
 
 async function runCase(c: EvalCase): Promise<RunOutcome> {
   const transcript: ChatMessage[] = [msg("user", c.report)];
-  const answers = [...(c.answers ?? []), "Nothing else, show me the draft"];
+  const answers = [...(c.answers ?? [])];
+  let nextAnswer = 0;
   const questions: string[] = [];
   const slots: Record<string, string> = {};
   let category = "";
@@ -61,6 +62,14 @@ async function runCase(c: EvalCase): Promise<RunOutcome> {
     category = t.classification.category;
     subcategory = t.classification.subcategory;
     for (const [k, v] of Object.entries(t.slots)) slots[k] = String(v.value);
+
+    // A reporter volunteers things unprompted too. If the case still has
+    // scripted turns left, deliver them before accepting the draft.
+    if ((t.readyForDraft || !t.nextQuestion) && nextAnswer < answers.length) {
+      transcript.push(msg("assistant", t.reply));
+      transcript.push(msg("user", answers[nextAnswer++]));
+      continue;
+    }
 
     if (t.readyForDraft || !t.nextQuestion) {
       const insight = await insightFromAgent({
@@ -93,7 +102,9 @@ async function runCase(c: EvalCase): Promise<RunOutcome> {
         "user",
         repeat
           ? "I don't have that — just draft the ticket with what you have."
-          : answers[Math.min(turn, answers.length - 1)],
+          : nextAnswer < answers.length
+            ? answers[nextAnswer++]
+            : "Nothing else, show me the draft.",
       ),
     );
   }

@@ -1,5 +1,4 @@
 import { and, desc, eq, gte } from "drizzle-orm";
-import { db } from "@/db";
 import { tickets } from "@/db/schema";
 import { tokenize } from "./ai";
 
@@ -38,6 +37,8 @@ export async function findRelatedTickets(input: {
 
   let rows;
   try {
+    // Loaded lazily so this module can be imported without a database.
+    const { db } = await import("@/db");
     rows = await db
       .select({
         id: tickets.id,

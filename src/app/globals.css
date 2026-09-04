@@ -318,6 +318,9 @@ body {
 .animate-floaty { animation: floaty 3.4s ease-in-out infinite; }
 .live-dot { animation: pulseGold 2.2s ease-in-out infinite; }
 .dot-blink { animation: blink 1.2s infinite both; }
+/* Typing caret shown while Iris's reply streams in. */
+.caret-blink { animation: caretBlink 1s steps(1, end) infinite; }
+@keyframes caretBlink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
 .spark-line { stroke-dasharray: 300; animation: drawLine 1.1s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .grow-bar { transform-origin: bottom; animation: growBar 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .bot-eye { transform-origin: center; animation: botBlink 4.2s infinite; }

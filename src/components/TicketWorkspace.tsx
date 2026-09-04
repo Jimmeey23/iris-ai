@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { Staff, Ticket, TicketEvent } from "@/db/schema";
@@ -25,14 +26,26 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
   );
 }
 
+export type LinkedTicket = {
+  id: number;
+  ticketNumber: string;
+  title: string;
+  status: string;
+  priority: string;
+  assigneeName: string | null;
+  parentTicketId: number | null;
+};
+
 export default function TicketWorkspace({
   ticket,
   events,
   staff,
+  linked = [],
 }: {
   ticket: Ticket;
   events: TicketEvent[];
   staff: Staff[];
+  linked?: LinkedTicket[];
 }) {
   const router = useRouter();
   const { user } = useUser();
@@ -211,6 +224,36 @@ export default function TicketWorkspace({
             ))}
           </dl>
         </div>
+
+        {linked.length > 0 && (
+          <div className="panel rounded-2xl">
+            <header className="border-b px-5 py-3.5 hairline">
+              <h2 className="serif text-[17px] leading-none txt">Linked tickets</h2>
+              <p className="mt-0.5 text-[11.5px] txt-3">
+                {ticket.parentTicketId
+                  ? "Split from the same report"
+                  : "Other issues raised from the same report"}
+              </p>
+            </header>
+            <ul className="divide-y hairline">
+              {linked.map((l) => (
+                <li key={l.id}>
+                  <Link
+                    href={`/tickets/${l.id}`}
+                    className="flex items-center gap-3 px-5 py-3 transition hover:bg-[var(--surface-3)]"
+                  >
+                    <span className="text-[11.5px] font-semibold accent-txt">{l.ticketNumber}</span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] txt-2">{l.title}</span>
+                    {l.id === ticket.parentTicketId && (
+                      <span className="chip chip-line text-[10px]">parent</span>
+                    )}
+                    <span className="text-[11px] txt-3">{l.status}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="panel rounded-2xl">
           <header className="border-b px-5 py-3.5 hairline">

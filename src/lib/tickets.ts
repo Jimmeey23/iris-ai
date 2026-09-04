@@ -132,6 +132,7 @@ export async function createTicketFromDraft(
       assigneeTeam: assignee?.department ?? department,
       assigneeEmail: assignee?.email ?? null,
       assignmentReason: reason,
+      parentTicketId: draft.parentTicketId ?? null,
       slaDueAt: slaDate(priority, createdAt, draft.slaResolveHours),
       createdAt,
       updatedAt: createdAt,
@@ -242,7 +243,26 @@ export async function getTicket(id: number) {
     .from(ticketEvents)
     .where(eq(ticketEvents.ticketId, id))
     .orderBy(asc(ticketEvents.createdAt), asc(ticketEvents.id));
-  return { ticket, events };
+
+  // Siblings and children raised from the same multi-issue report.
+  const linkIds = [...new Set([...(ticket.linkedTicketIds ?? []), ...(ticket.parentTicketId ? [ticket.parentTicketId] : [])])]
+    .filter((linkId) => linkId !== id);
+  const linked = linkIds.length
+    ? await db
+        .select({
+          id: tickets.id,
+          ticketNumber: tickets.ticketNumber,
+          title: tickets.title,
+          status: tickets.status,
+          priority: tickets.priority,
+          assigneeName: tickets.assigneeName,
+          parentTicketId: tickets.parentTicketId,
+        })
+        .from(tickets)
+        .where(inArray(tickets.id, linkIds))
+    : [];
+
+  return { ticket, events, linked };
 }
 
 export type DashboardStats = {
@@ -438,4 +458,78 @@ export async function updateTicket(
   if (reassigned && updated) await notifyAssignee(updated, "reassigned");
 
   return updated;
+}
+
+/* ------------------------------------------------------------------ */
+/* Multi-issue reports                                                 */
+/* ------------------------------------------------------------------ */
+
+export type RaisedBundle = {
+  primary: Ticket;
+  children: Ticket[];
+};
+
+/**
+ * Raise a report that surfaced more than one problem.
+ *
+ * The primary ticket carries the root cause and the full narrative; each
+ * secondary issue becomes its own ticket so it routes to, and is closed by, the
+ * team that actually owns it. Every ticket in the bundle knows about the others.
+ */
+export async function createTicketBundle(draft: TicketDraft): Promise<RaisedBundle> {
+  const secondaries = (draft.secondaryIssues ?? []).slice(0, 4);
+  const primary = await createTicketFromDraft({ ...draft, secondaryIssues: undefined });
+  if (secondaries.length === 0) return { primary, children: [] };
+
+  const children: Ticket[] = [];
+  for (const issue of secondaries) {
+    const child = await createTicketFromDraft({
+      ...draft,
+      parentTicketId: primary.id,
+      secondaryIssues: undefined,
+      category: issue.category,
+      subcategory: issue.subcategory,
+      title: issue.title.slice(0, 140),
+      summary: issue.summary,
+      description: `${issue.summary}\n\nSplit from ${primary.ticketNumber}: ${primary.title}\n\nOriginal report:\n${draft.description}`,
+      // A knock-on effect is rarely more urgent than the fault that caused it.
+      priority: draft.priority === "Critical" ? "High" : draft.priority,
+      tags: [...new Set([...draft.tags, "linked-issue"])].slice(0, 6),
+    });
+    children.push(child);
+    await addEvent(
+      child.id,
+      "system",
+      "Iris",
+      `Split from ${primary.ticketNumber} — same report, different owner.`,
+    );
+  }
+
+  const childIds = children.map((c) => c.id);
+  const [updatedPrimary] = await db
+    .update(tickets)
+    .set({ linkedTicketIds: childIds, updatedAt: new Date() })
+    .where(eq(tickets.id, primary.id))
+    .returning();
+
+  for (const child of children) {
+    await db
+      .update(tickets)
+      .set({
+        linkedTicketIds: [primary.id, ...childIds.filter((id) => id !== child.id)],
+        updatedAt: new Date(),
+      })
+      .where(eq(tickets.id, child.id));
+  }
+
+  await addEvent(
+    primary.id,
+    "system",
+    "Iris",
+    `This report surfaced ${children.length} further issue${children.length === 1 ? "" : "s"}, raised as ${children
+      .map((c) => c.ticketNumber)
+      .join(", ")}.`,
+  );
+
+  return { primary: updatedPrimary ?? primary, children };
 }

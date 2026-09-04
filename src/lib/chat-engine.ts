@@ -70,6 +70,8 @@ export type IntakeState = {
   /** Question ids the LLM agent has already put to this reporter. */
   agentAsked?: string[];
   pendingQuestionId?: string | null;
+  /** Momence lookups already run this session, kept so they are never repeated. */
+  toolResults?: { tool: string; args?: Record<string, unknown>; result: string }[];
   /** Insight computed once at draft time and reused on approval. */
   insight?: AiInsight;
 };
@@ -541,6 +543,7 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
     details,
     momenceContext: d.momenceContext,
     source: "AI Assistant",
+    secondaryIssues: d.secondaryIssues,
     priorityReason: d.priorityOverride ? "Set manually during intake" : ai.priorityReason,
   };
 }
@@ -1260,21 +1263,30 @@ function slotValue(slot: SlotId, d: IntakeData): string | undefined {
   return v === undefined ? undefined : String(v);
 }
 
-export function createdMessage(ticket: {
-  id: number;
-  ticketNumber: string;
-  assigneeName: string | null;
-  assigneeTeam: string | null;
-  assigneeEmail: string | null;
-  assignmentReason: string | null;
-  slaDueAt: Date | null;
-  priority: string;
-}): ChatMessage {
+export function createdMessage(
+  ticket: {
+    id: number;
+    ticketNumber: string;
+    assigneeName: string | null;
+    assigneeTeam: string | null;
+    assigneeEmail: string | null;
+    assignmentReason: string | null;
+    slaDueAt: Date | null;
+    priority: string;
+  },
+  linked: { ticketNumber: string; title: string; assigneeName: string | null }[] = [],
+): ChatMessage {
   const hours = ticket.slaDueAt
     ? Math.max(1, Math.round((ticket.slaDueAt.getTime() - Date.now()) / 3600000))
     : 24;
+  const linkedNote = linked.length
+    ? `\n\nThis report also covered ${linked.length === 1 ? "one other issue" : `${linked.length} other issues`}, so I raised ${linked.length === 1 ? "a linked ticket" : "linked tickets"} that route separately:\n${linked
+        .map((l) => `• **${l.ticketNumber}** — ${l.title}${l.assigneeName ? ` (${l.assigneeName})` : ""}`)
+        .join("\n")}`
+    : "";
+
   return assistant(
-    `Done — **${ticket.ticketNumber}** is live. ${closingLine(ticket.assigneeName, hours)}`,
+    `Done — **${ticket.ticketNumber}** is live. ${closingLine(ticket.assigneeName, hours)}${linkedNote}`,
     {
     kind: "created",
     created: {

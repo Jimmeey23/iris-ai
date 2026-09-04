@@ -1,6 +1,7 @@
 import { CATEGORIES, CATEGORY_META, TAXONOMY, type Priority } from "./taxonomy";
-import { chatJson } from "./llm";
+import { chatJson, chatJsonStreaming } from "./llm";
 import { MAX_QUESTIONS, resolveClassification, tidyReply } from "./guardrails";
+import { TOOL_CATALOGUE, type ToolCall, type ToolResult } from "./agent-tools";
 import type { ChatMessage, ChatOption } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -66,6 +67,8 @@ export type AgentTurn = {
   insight?: AgentInsight;
   /** Facts worth carrying onto the ticket that no slot covers. */
   extraDetails?: Record<string, string>;
+  /** Momence lookups the agent wants run before it continues. */
+  toolCalls?: ToolCall[];
 };
 
 export type AgentContext = {
@@ -80,6 +83,10 @@ export type AgentContext = {
   /** Similar recent tickets, so the agent can spot a recurring fault. */
   relatedTickets?: { ticketNumber: string; title: string; createdAt: string; status: string }[];
   momenceNote?: string;
+  /** True when Momence is connected and lookups may be offered. */
+  toolsEnabled?: boolean;
+  /** Lookups already run this session, with their results. */
+  toolResults?: ToolResult[];
 };
 
 /* ------------------------------------------------------------------ */
@@ -109,7 +116,7 @@ WHAT EACH SLOT MEANS — keep them distinct, they land in different ticket field
 - trainer: the person who taught or was involved. Capture the name however it is written — lowercase, initials, a nickname ("kv", "Neha", "KV Sharma") all count.
 - classInfo: WHICH class — format, level and clock time ("6pm Mat 57", "10am BBB, 10.30am Cycle, 11am FIT"). List every class involved.
 - occurredAt: WHEN it happened, as a time phrase only ("Just now", "Earlier today, 10:00-11:30 am"). Never put the class name here.
-- location: WHERE inside the premises — a room or area ("Studio 1", "showers", "locker room", "reception"). Physical places go here.
+- location: WHERE inside the premises, never the studio name itself — a room or area ("Studio 1", "showers", "locker room", "reception"). Physical places go here.
 - systemAffected: a device, platform or piece of equipment ("Momence", "POS", "speaker system", "Wi-Fi"). A room is NOT a system.
 - impact: ALWAYS fill it — safety | many | single | suggestion.
 - atRisk: true only when a person is in danger RIGHT NOW or the hazard is live and unguarded. A fault that could hurt someone later is not atRisk.
@@ -168,6 +175,7 @@ Return STRICT JSON only, matching this shape exactly:
     "picker": "member|session|trainer|studio|membership",
     "skipLabel": "..."
   },
+  "toolCalls": [{"tool": "...", "args": {}}],
   "readyForDraft": false,
   "insight": {
     "title": "8-12 word ticket title, specific to this incident, no trailing period",
@@ -192,6 +200,7 @@ Rules for the JSON:
 - "occurredAt" is a human phrase such as "Just now", "Earlier today, 10:00-11:30 am".
 - "actionTaken" is anything the team already did on the floor. Capture it whenever it is mentioned — it is the most commonly lost detail.
 - Always include "raisedFor" and "impact" in slots once you can infer them, even on the first turn.
+- Omit "toolCalls" entirely unless you are requesting a lookup this turn.
 - Emit "insight" ONLY when "readyForDraft" is true. Otherwise omit it.
 - Set "nextQuestion" to null when "readyForDraft" is true, and vice versa.
 - Category and subcategory MUST be copied verbatim from the taxonomy provided.`;
@@ -204,9 +213,18 @@ function renderTranscript(transcript: ChatMessage[]): string {
     .join("\n");
 }
 
+export type RunAgentOptions = {
+  /**
+   * Called with each newly written slice of the agent's conversational reply,
+   * before the rest of the analysis has finished generating.
+   */
+  onReplyDelta?: (text: string) => void;
+};
+
 export async function runAgent(
   transcript: ChatMessage[],
   ctx: AgentContext,
+  opts: RunAgentOptions = {},
 ): Promise<{ ok: boolean; turn?: AgentTurn; error?: string; latencyMs: number; model?: string }> {
   const knownLines = Object.entries(ctx.known)
     .filter(([, v]) => v !== undefined && v !== "")
@@ -236,6 +254,15 @@ QUESTION BUDGET REMAINING: ${Math.max(0, (ctx.questionBudget ?? MAX_QUESTIONS) -
 
 SIMILAR RECENT TICKETS (use to spot a recurring fault; mention it if relevant):
 ${related}
+
+${ctx.toolsEnabled ? TOOL_CATALOGUE : "Momence lookups are unavailable this session — do not request any."}
+${
+  ctx.toolResults?.length
+    ? `\nLOOKUP RESULTS SO FAR (already run — never request these again):\n${ctx.toolResults
+        .map((r) => `${r.tool}(${JSON.stringify(r.args ?? {})}) →\n${r.result}`)
+        .join("\n\n")}`
+    : ""
+}
 ${ctx.momenceNote ? `\nMOMENCE CONTEXT:\n${ctx.momenceNote}` : ""}
 
 CONVERSATION SO FAR
@@ -243,15 +270,19 @@ ${renderTranscript(transcript)}
 
 Produce the JSON for this turn.`;
 
-  const res = await chatJson<AgentTurn>({
+  const params = {
     system: SYSTEM_PROMPT,
     user,
-    tier: "reason",
+    tier: "reason" as const,
     temperature: 0.25,
     maxTokens: 1600,
-    timeoutMs: 30000,
+    timeoutMs: 45000,
     retries: 1,
-  });
+  };
+
+  const res = opts.onReplyDelta
+    ? await chatJsonStreaming<AgentTurn>({ ...params, onFieldDelta: opts.onReplyDelta })
+    : await chatJson<AgentTurn>(params);
 
   if (!res.ok || !res.data) {
     return { ok: false, error: res.error, latencyMs: res.latencyMs, model: res.model };
@@ -315,7 +346,12 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
       }
     : null;
 
-  const readyForDraft = raw.readyForDraft === true || !nextQuestion;
+  const toolCalls = (raw.toolCalls ?? [])
+    .filter((c) => c && typeof c.tool === "string")
+    .slice(0, 3);
+
+  // A lookup turn is neither a question nor a draft — it is a pause for facts.
+  const readyForDraft = toolCalls.length ? false : raw.readyForDraft === true || !nextQuestion;
 
   return {
     reply: tidyReply(raw.reply, "Got it."),
@@ -335,8 +371,9 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
         return { ...i, category: r.category, subcategory: r.subcategory };
       }),
     extraDetails: raw.extraDetails ?? {},
-    nextQuestion: readyForDraft ? null : nextQuestion,
+    nextQuestion: readyForDraft || toolCalls.length ? null : nextQuestion,
     readyForDraft,
+    toolCalls,
     insight: readyForDraft ? raw.insight : undefined,
   };
 }

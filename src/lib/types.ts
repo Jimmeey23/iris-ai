@@ -60,6 +60,17 @@ export type TicketDraft = {
   momenceContext?: MomenceContext;
   source: string;
   priorityReason?: string;
+  /** Set when this draft is a child split out of a multi-issue report. */
+  parentTicketId?: number;
+  /** Other problems the same report surfaced, raised as linked tickets on approval. */
+  secondaryIssues?: SecondaryIssue[];
+};
+
+export type SecondaryIssue = {
+  title: string;
+  category: string;
+  subcategory: string;
+  summary: string;
 };
 
 export type ChatOption = {

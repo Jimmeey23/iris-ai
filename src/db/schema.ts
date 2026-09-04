@@ -92,6 +92,10 @@ export const tickets = pgTable("tickets", {
   firstResponseAt: timestamp("first_response_at", { withTimezone: true }),
   assignmentReason: text("assignment_reason"),
   slaDueAt: timestamp("sla_due_at", { withTimezone: true }),
+  /** Set on a child ticket split out of a multi-issue report. */
+  parentTicketId: integer("parent_ticket_id"),
+  /** Sibling and child tickets raised from the same report. */
+  linkedTicketIds: jsonb("linked_ticket_ids").$type<number[]>().notNull().default([]),
   resolutionNotes: text("resolution_notes"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -101,6 +105,7 @@ export const tickets = pgTable("tickets", {
   index("tickets_assignee_id_idx").on(t.assigneeId),
   index("tickets_studio_id_idx").on(t.studioId),
   index("tickets_category_idx").on(t.category),
+  index("tickets_parent_ticket_id_idx").on(t.parentTicketId),
 ]);
 
 export const ticketEvents = pgTable("ticket_events", {

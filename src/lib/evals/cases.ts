@@ -35,7 +35,6 @@ export const EVAL_CASES: EvalCase[] = [
     id: "power-outage-kemps",
     report:
       "HI, there was no electricity at the Studio for an hour at kemps Corner - we had BBB scheduled at 10 am, cycle at 10.30am and FIT at 11 am. Strength lab had electricity so we moved the 10.15 BBB to that room. 1 client showed up for cycle - kv conducted the class - there was no AC in the room and partial lights and no AC. Client insisted on doing the class - portable cooler was provided to conduct the class. 11 am FIT started with no ac & music. at 11.30am the portable cooler was moved",
-    answers: ["Nothing else, show me the draft"],
     expect: {
       category: ["Repair and Maintenance", "Operating Systems", "Safety and Security"],
       subcategoryLike: ["power", "utility", "outage"],
@@ -50,7 +49,7 @@ export const EVAL_CASES: EvalCase[] = [
     id: "trainer-late-single-member",
     report:
       "A member, Priya Shah, complained that the trainer for the 7am Barre 57 at Bandra turned up 12 minutes late and the class was cut short. She's on an annual membership and is quite upset.",
-    answers: ["Neha", "First time", "Nothing else"],
+    answers: ["Neha", "First time"],
     expect: {
       category: ["Trainer Feedback", "Class Experience", "Customer Service and Communication"],
       subcategoryLike: ["punctual", "late", "start", "duration", "length"],
@@ -91,7 +90,7 @@ export const EVAL_CASES: EvalCase[] = [
     id: "double-charge-billing",
     report:
       "Member Ritu Malhotra says she was charged twice for her 20-class pack on 2 September — ₹24,000 instead of ₹12,000. She wants a refund today.",
-    answers: ["ritu@example.com", "Nothing else"],
+    answers: ["ritu@example.com"],
     expect: {
       category: ["Pricing and Memberships", "Customer Service and Communication"],
       subcategoryLike: ["charge", "billing", "refund", "payment", "double"],
@@ -132,7 +131,7 @@ export const EVAL_CASES: EvalCase[] = [
   {
     id: "correction-mid-conversation",
     report: "The 8am cycle class at Bandra was overcrowded today, about 4 people had no bike.",
-    answers: ["Actually it was the 9am class, not 8am", "Nothing else"],
+    answers: ["Actually it was the 9am class, not 8am"],
     expect: {
       category: ["Class Experience", "Scheduling"],
       subcategoryLike: ["crowd", "capacity", "equipment", "space"],

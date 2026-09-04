@@ -36,6 +36,13 @@
       "when": 1786870484807,
       "tag": "0004_faithful_paper_doll",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788501386072,
+      "tag": "0005_stormy_bucky",
+      "breakpoints": true
     }
   ]
 }
