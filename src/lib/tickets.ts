@@ -4,6 +4,7 @@ import { departments, staff, studios, ticketEvents, tickets } from "@/db/schema"
 import type { Ticket, Staff, Studio, Department } from "@/db/schema";
 import { SLA_HOURS, type Priority } from "./taxonomy";
 import { CATEGORY_DEPARTMENT, CATEGORY_ROLE_PREFERENCE } from "./org";
+import { ownerMatchesHint } from "./issue-knowledge";
 import type { TicketDraft } from "./types";
 import { notifyAssignee } from "./notify";
 
@@ -23,14 +24,29 @@ export async function getDepartments(): Promise<Department[]> {
 
 export type AssignmentResult = { assignee: Staff | null; reason: string; department: string };
 
-/** Routing: category → department → role seniority → studio match → lightest open load. */
+/** Routing: category → historic owner → department → role seniority → studio match → lightest open load.
+ *  An `ownerHint` from the historic-issue patterns outranks the queue rules: if
+ *  the company has consistently sent this kind of ticket to one person, keep doing that. */
 export async function pickAssignee(
   category: string,
   studioId: number | null,
   studioName?: string,
+  ownerHint?: string,
 ): Promise<AssignmentResult> {
   const department = CATEGORY_DEPARTMENT[category] ?? "Operations";
   const people = await getStaff();
+
+  if (ownerHint) {
+    const historic = people.find((p) => ownerMatchesHint(p.name, ownerHint));
+    if (historic) {
+      return {
+        assignee: historic,
+        reason: `historic owner for ${category} tickets (pattern memory: "${ownerHint}")`,
+        department,
+      };
+    }
+  }
+
   const inDept = people.filter((p) => p.department === department);
   const pool = inDept.length > 0 ? inDept : people;
   if (pool.length === 0) {
@@ -78,6 +94,7 @@ export async function createTicketFromDraft(
     draft.category,
     draft.studioId,
     draft.studioName,
+    draft.ownerHint,
   );
   const createdAt = opts.createdAt ?? new Date();
   const priority = draft.priority;

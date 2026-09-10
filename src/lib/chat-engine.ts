@@ -2,6 +2,7 @@ import { classify, extractStudio } from "./ai";
 import { localEnrich, type AiInsight } from "./enrich";
 import { CATEGORIES, CATEGORY_META, TAXONOMY, metaFor, type Priority } from "./taxonomy";
 import { CATEGORY_DEPARTMENT } from "./org";
+import { suggestOwner } from "./issue-knowledge";
 import { buildQuestion, issueIntro, planSlots, type SlotId } from "./dynamic-chat";
 import { WHY, ack, closingLine, coachTip, progressNote, reactTo, timeGreeting } from "./conversation";
 import type { ChatMessage, ChatOption, ComposerContext, MomenceContext, TicketDraft } from "./types";
@@ -606,6 +607,7 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   return {
     category,
     subcategory,
+    ownerHint: suggestOwner(category, subcategory),
     title: ai.title.slice(0, 140),
     summary: ai.summary,
     description: detailLines.join("\n\n"),
@@ -653,8 +655,9 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
 
 export function reviewMessage(s: IntakeState, ctx: EngineContext, insight?: AiInsight): ChatMessage {
   const draft = buildDraft(s, ctx, insight);
+  const first = ctx.reporter.name.split(" ")[0] || "there";
   return assistant(
-    "Here's your draft with my full read on it. Give it a look — approve and I'll route it straight to the right owner.",
+    `Here's your draft, ${first} — my full read on it. Give it a look, and approve when you're happy and I'll route it straight to the right owner.`,
     {
       kind: "draft",
       draft,

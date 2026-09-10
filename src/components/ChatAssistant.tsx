@@ -87,6 +87,11 @@ export function DraftCard({ draft }: { draft: TicketDraft }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[9px] font-semibold uppercase tracking-[0.24em] txt-3">Ticket draft</span>
           <span className="chip chip-line">{draft.department}</span>
+          {draft.ownerHint && (
+            <span className="chip chip-line !text-[9px]" title="Who usually owns these tickets, from the historic issue patterns">
+              Suggested owner: {draft.ownerHint}
+            </span>
+          )}
           <span className="ml-auto flex items-center gap-1.5">
             <span className="chip" style={{ background: "var(--surface-3)", color: sevColor }}>{sev}</span>
             <PriorityPill priority={draft.priority} />

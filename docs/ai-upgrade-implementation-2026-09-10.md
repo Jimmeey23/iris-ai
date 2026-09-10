@@ -78,3 +78,25 @@ The reported "unable to send any messages to Iris" was two stacked issues:
 Support changes: `parseBody` logs every 400 with issue list + truncated body
 (server-side diagnosability), and `allowedDevOrigins: ["*.e2b.app"]` unblocks
 HMR through the preview proxy in dev.
+
+## Agent upgrade: pattern memory, coverage floor, personality (2026-09-10)
+
+Trained from the 464-report historic export (`data/historic-tickets.json`) — **read-only**;
+nothing was imported (the rows are already in the app's own DB).
+
+- **Pattern memory** (`scripts/build-issue-knowledge.mjs` → `issue-knowledge.generated.ts`,
+  runtime in `issue-knowledge.ts`): 29 issue families distilled with keywords, typical root
+  causes, what worked before, usual owners, studios and priority. Closest matches are
+  injected into every agent prompt as bounded, injection-safe "PATTERN MEMORY" context, so
+  Iris answers like an insider ("the fourth AC complaint from that studio").
+- **Routing**: `suggestOwner` picks the historic owner per category/subcategory; it shows on
+  the draft card ("Suggested owner") and — at approval — outranks queue rules in
+  `pickAssignee` when it names a real staff member.
+- **Coverage floor**: `MIN_AGENT_QUESTIONS = 4` (ladder cap 5). No draft until at least four
+  distinct questions have gone out; when the model runs out early, a high-value ladder
+  (action taken → when → frequency → membership → witnesses → note for owner) back-fills.
+  The reporter can still say "just raise it" to skip ahead. Draft was previously possible
+  after one message.
+- **Personality**: the persona now mandates the reporter's FIRST NAME in every reply,
+  friend-not-bot tone (contractions, situation-specific reactions, no corporate filler),
+  and personalises the deterministic nudges and draft lead-in too.

@@ -19,6 +19,7 @@ import { CATEGORY_META } from "./taxonomy";
 import { applyComposerContext, IMPACT_LABEL } from "./chat-inference";
 import { runAgent, generateSummary, questionOptions, CANONICAL_SLOTS, type AgentContext, type AgentQuestion } from "./agent";
 import { missingRequired, normaliseRaisedFor, questionBudget } from "./guardrails";
+import { issueKnowledgeBlock, suggestOwner } from "./issue-knowledge";
 import { insightFromAgent } from "./enrich";
 import { findRelatedTickets } from "./recurrence";
 import { findContextFacts } from "./memory";
@@ -621,6 +622,98 @@ function analysisChips(s: IntakeState, confidence: number): ChatMessage["analysi
 /* Turn                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Coverage floor: the owner wants the full story every time — who/what/where/
+ * when, impact, what was already tried and whether it is still happening. A
+ * ticket drafted off a single message is rarely routable, so the agent keeps
+ * the conversation going until at least this many distinct questions have gone
+ * out (the reporter can still say "just raise it" to skip ahead).
+ */
+export const MIN_AGENT_QUESTIONS = 4;
+/** Upper bound for the back-filled ladder, so "at least 4-5" never becomes 8. */
+const LADDER_MAX = 5;
+
+function firstName(ctx: EngineContext): string {
+  return ctx.reporter.name.split(" ")[0] || "there";
+}
+
+/**
+ * High-value follow-ups for when the model is out of questions but the floor
+ * is not met yet. Ordered by owner value; each fires once (agentAsked dedupes)
+ * and only when the slot is genuinely unknown.
+ */
+export function followUpQuestion(
+  s: IntakeState,
+  ctx: EngineContext,
+): { id: string; ask: string; options?: { label: string; value: string }[]; allowFreeText: boolean; placeholder?: string } | null {
+  if ((s.agentAsked?.length ?? 0) >= LADDER_MAX) return null;
+  const d = s.data;
+  const first = firstName(ctx);
+
+  const ladder: ({
+    id: string;
+    ask: string;
+    options?: { label: string; value: string }[];
+    allowFreeText: boolean;
+    placeholder?: string;
+  } | null)[] = [
+    !d.actionTaken
+      ? {
+          id: "actionTaken",
+          ask: `Have you or the team already tried anything on it, ${first}?`,
+          allowFreeText: true,
+          placeholder: "e.g. moved the class, restart the unit, told reception…",
+        }
+      : null,
+    !d.occurredAt
+      ? {
+          id: "occurredAt",
+          ask: `When did this actually happen, ${first}?`,
+          options: ["Just now", "This morning", "Yesterday", "Earlier this week"].map((label) => ({
+            label,
+            value: `ans:occurredAt|${label}`,
+          })),
+          allowFreeText: true,
+        }
+      : null,
+    !d.frequency
+      ? {
+          id: "frequency",
+          ask: `First time you've seen this one, or a repeat offender?`,
+          options: ["First time", "Happened before", "Keeps happening"].map((label) => ({
+            label,
+            value: `ans:frequency|${label}`,
+          })),
+          allowFreeText: true,
+        }
+      : null,
+    d.raisedFor === "On behalf of a member" && d.memberName && !d.membershipRef
+      ? {
+          id: "membershipRef",
+          ask: `Do you know what pack or membership ${d.memberName.split(" ")[0]} is on, ${first}?`,
+          allowFreeText: true,
+          placeholder: "e.g. 20-class pack, annual, trial…",
+        }
+      : null,
+    !d.witnesses
+      ? {
+          id: "witnesses",
+          ask: `Anyone else see it or involved, ${first}?`,
+          allowFreeText: true,
+        }
+      : null,
+    {
+      id: "custom:owner_update",
+      ask: `Anything you want me to tell the owner directly, ${first} — or should they copy you on the fix?`,
+      allowFreeText: true,
+    },
+  ];
+  for (const q of ladder) {
+    if (q && !(s.agentAsked ?? []).includes(q.id)) return q;
+  }
+  return null;
+}
+
 export type AgentTurnResult = EngineResult & {
   usedAgent: boolean;
   degraded?: string;
@@ -681,7 +774,7 @@ export async function runAgentTurn(
       usedAgent: false,
       messages: [
         assistantMessage(
-          "Tell me what happened in your own words — I'll work out the rest and only ask about the gaps.",
+          `Tell me what happened in your own words, ${firstName(ctx)} — I'll work out the rest and only ask about the gaps.`,
           { allowFreeText: true, placeholder: "What happened?" },
         ),
       ],
@@ -768,6 +861,10 @@ export async function runAgentTurn(
       status: r.status,
     })),
     memoryFacts,
+    historicPatterns: issueKnowledgeBlock(narrative, {
+      category: s.data.category,
+      subcategory: s.data.subcategory,
+    }),
     momenceNote: s.data.momenceContext ? JSON.stringify(s.data.momenceContext) : undefined,
     toolsEnabled,
     toolResults,
@@ -972,6 +1069,17 @@ export async function runAgentTurn(
   // owner-critical gates always get their one focused ask.
   if (budgetSpent && question && !["studio", "impact", "resolvedNow"].includes(question.id)) {
     question = null;
+  }
+
+  // Coverage floor: no draft until the agent has asked at least
+  // MIN_AGENT_QUESTIONS distinct questions. Back-fill from the ladder when the
+  // model ran out early — unless the reporter explicitly wants it filed now.
+  const wantsDraftNow =
+    /just (raise|file|log|create)( the)? (it|ticket|draft)\b|raise (it|the ticket) (now|directly)|skip (the )?questions|no more questions|draft it now/i.test(
+      utterance,
+    );
+  if (!question && !wantsDraftNow && (s.agentAsked?.length ?? 0) < MIN_AGENT_QUESTIONS) {
+    question = followUpQuestion(s, ctx);
   }
 
   const first = (state.agentAsked?.length ?? 0) === 0 && state.step === "describe";
