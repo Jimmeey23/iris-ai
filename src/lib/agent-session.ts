@@ -595,7 +595,14 @@ function questionMessage(
   budget: number,
 ): ChatMessage {
   const body = q.why ? `${q.ask}\n_${q.why}_` : q.ask;
-  const content = reply ? `${reply}\n\n${body}` : body;
+  // The structured question owns the ask (and may have been replaced by a
+  // routing gate). Keep acknowledgement sentences, never a second model ask.
+  const acknowledgement = reply
+    .split(/(?<=[.!?])\s+|\n+/u)
+    .filter((sentence) => !sentence.includes("?"))
+    .join(" ")
+    .trim();
+  const content = acknowledgement ? `${acknowledgement}\n\n${body}` : body;
   const options = q.id === "studio" ? studioOptions(ctx) : questionOptions(q);
   return assistantMessage(content, {
     options,
@@ -1102,18 +1109,9 @@ export async function runAgentTurn(
     s.step = "agent_q";
     s.pendingQuestionId = question.id;
     s.agentAsked = [...(s.agentAsked ?? []), question.id];
-    const messages: ChatMessage[] = [];
-    if (first) {
-      messages.push(
-        assistantMessage(turn.reply, {
-          analysis: analysisChips(s, turn.classification.confidence),
-          ...(inferred.length ? { inferred } : {}),
-        }),
-      );
-      messages.push(questionMessage(question, "", s, ctx, [], budget));
-    } else {
-      messages.push(questionMessage(question, turn.reply, s, ctx, inferred, budget));
-    }
+    const message = questionMessage(question, turn.reply, s, ctx, inferred, budget);
+    if (first) message.analysis = analysisChips(s, turn.classification.confidence);
+    const messages = [message];
     return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 

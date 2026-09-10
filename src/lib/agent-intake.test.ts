@@ -54,3 +54,42 @@ it("starts routing when a real report follows a greeting", async () => {
   expect(result.state.pendingQuestionId).toBe("studio");
   expect(result.state.agentAsked).toEqual(["studio"]);
 });
+
+it.each(["describe", "agent_q"] as const)("renders the power-outage question once in %s", async (step) => {
+  const state = emptyState();
+  state.step = step;
+  state.data.studioId = null;
+  state.data.studioName = "Kemps Corner";
+  if (step === "agent_q") state.agentAsked = ["occurredAt"];
+  const ask = "Was the power issue resolved by 11:30 am?";
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: {
+    ...invitation, reportEstablished: true,
+    reply: `Got it, Jimmeey. Sounds like a rough morning at Kemps Corner. ${ask}`,
+    classification: { ...invitation.classification, confidence: 0.9 },
+    nextQuestion: {
+      id: "resolvedNow", ask,
+      why: "To determine if the issue is ongoing or resolved.",
+      options: [{ label: "Resolved", value: "yes" }, { label: "Still happening", value: "no" }],
+    },
+  } });
+  const result = await runAgentTurn(state, [], { text: "There was no electricity for an hour at Kemps Corner." }, ctx);
+  expect(result.messages).toHaveLength(1);
+  expect(result.messages[0].content.split(ask)).toHaveLength(2);
+  expect(result.messages[0].content).toContain("Got it, Jimmeey.");
+  expect(result.messages[0].options).toHaveLength(2);
+  expect(result.state.pendingQuestionId).toBe("resolvedNow");
+  expect(Boolean(result.messages[0].analysis)).toBe(step === "describe");
+});
+
+it("removes the model's original ask when a routing gate replaces it", async () => {
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: {
+    ...invitation, reportEstablished: true,
+    reply: "Got it, Jimmeey. Has the electricity returned?",
+    nextQuestion: { id: "resolvedNow", ask: "Is the power back?" },
+  } });
+  const result = await runAgentTurn(emptyState(), [], { text: "The electricity went out." }, ctx);
+  expect(result.messages).toHaveLength(1);
+  expect(result.messages[0].content).toContain("Which studio does this relate to?");
+  expect(result.messages[0].content).not.toContain("Has the electricity returned?");
+  expect(result.messages[0].content).not.toContain("Is the power back?");
+});
