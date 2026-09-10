@@ -1,7 +1,10 @@
 import { ensureSeeded } from "@/lib/seed";
 import { runChatTurn, type ChatTurnBody } from "@/lib/chat-service";
 import { chatBodySchema } from "../route";
+import { getSessionUser } from "@/lib/session";
 import { ValidationError, parseBody, validationErrorResponse } from "@/lib/validation";
+import { clientKey, rateLimit } from "@/lib/rate-limit";
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
@@ -14,11 +17,43 @@ export const dynamic = "force-dynamic";
  * the same payload as POST /api/chat, so the client can fall back to that
  * endpoint at any time.
  */
+function newSessionId(): string {
+  return `s_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+async function prepare(body: ChatTurnBody): Promise<ChatTurnBody> {
+  let reporter = body.reporter;
+  try {
+    const user = await getSessionUser();
+    if (user) {
+      const roleLine = [user.jobTitle || user.role, user.studio].filter(Boolean).join(", ");
+      reporter = {
+        name: user.name || user.email,
+        role: roleLine || user.role || "Team",
+      };
+    }
+  } catch {
+    // No Supabase session in this environment — keep the supplied reporter.
+  }
+  return {
+    ...body,
+    sessionId: body.sessionId ?? newSessionId(),
+    reporter,
+  };
+}
+
 export async function POST(request: Request) {
+  const limit = rateLimit(`chat:${clientKey(request)}`, 30, 5 * 60_000);
+  if (!limit.ok) {
+    return NextResponse.json(
+      { error: "Too many turns — take a breath and try again shortly." },
+      { status: 429, headers: { "Retry-After": String(limit.retryAfterSeconds) } },
+    );
+  }
   await ensureSeeded();
   let body: ChatTurnBody;
   try {
-    body = await parseBody(request, chatBodySchema);
+    body = await prepare(await parseBody(request, chatBodySchema));
   } catch (err) {
     if (err instanceof ValidationError) return validationErrorResponse(err);
     throw err;

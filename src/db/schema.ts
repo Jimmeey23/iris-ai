@@ -98,6 +98,8 @@ export const tickets = pgTable("tickets", {
   linkedTicketIds: jsonb("linked_ticket_ids").$type<number[]>().notNull().default([]),
   resolutionNotes: text("resolution_notes"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  /** Vector embedding of title+summary+rootCause, for semantic related-ticket search. */
+  embedding: jsonb("embedding").$type<number[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
@@ -281,3 +283,40 @@ export type CustomFilloutForm = typeof customFilloutForms.$inferSelect;
 export type TrainerAnalysis = typeof trainerAnalysis.$inferSelect;
 export type WhatsappTemplate = typeof whatsappTemplates.$inferSelect;
 export type UserAccount = typeof userAccounts.$inferSelect;
+
+/**
+ * One row per AI model call: feature, model, outcome, latency and tokens.
+ * Written best-effort by the shared LLM wrapper so quality, cost and
+ * degradation are observable per feature over time.
+ */
+export const aiCalls = pgTable("ai_calls", {
+  id: serial("id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  feature: text("feature").notNull().default("unknown"),
+  model: text("model"),
+  ok: boolean("ok").notNull(),
+  error: text("error"),
+  latencyMs: integer("latency_ms"),
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  sessionId: text("session_id"),
+}, (t) => [
+  index("ai_calls_created_at_idx").on(t.createdAt),
+  index("ai_calls_feature_idx").on(t.feature),
+]);
+
+/**
+ * Lightweight studio/member memory: one-line facts remembered from past
+ * tickets ("T-142: AC compressor fault — vendor replaced capacitor") injected
+ * into future intake conversations so the assistant knows the studio's history.
+ */
+export const contextFacts = pgTable("context_facts", {
+  id: serial("id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  scope: text("scope").notNull().default("studio"),
+  refKey: text("ref_key").notNull(),
+  fact: text("fact").notNull(),
+  sourceTicketNumber: text("source_ticket_number"),
+}, (t) => [
+  index("context_facts_scope_ref_idx").on(t.scope, t.refKey),
+]);

@@ -1,11 +1,14 @@
 import { getOpenAiKey, getSetting } from "./settings";
+import { recordAiCall } from "./telemetry";
 
 /**
- * Thin OpenAI JSON wrapper used by every AI path in the app.
+ * The single OpenAI client every AI path in the app goes through.
  *
- * Two tiers so we never pay frontier prices for cosmetic work:
+ * One place owns retries, timeouts, JSON parsing, telemetry and model selection,
+ * so behaviour cannot drift per feature. Two tiers so we never pay frontier
+ * prices for cosmetic work:
  *  - "reason"  → classification, extraction, question planning, enrichment
- *  - "fast"    → wording touch-ups where a mistake costs nothing
+ *  - "fast"    → wording touch-ups and compression where a mistake costs nothing
  */
 export type ModelTier = "reason" | "fast";
 
@@ -39,6 +42,10 @@ export type LlmCall = {
   retries?: number;
   /** Strict JSON Schema for model output. Falls back to JSON object mode when omitted. */
   responseSchema?: { name: string; schema: Record<string, unknown> };
+  /** Telemetry bucket, e.g. "intake" | "triage" | "copy" | "narrative". */
+  feature?: string;
+  /** Chat session id, for joining telemetry to conversations. */
+  sessionId?: string;
 };
 
 function responseFormat(call: LlmCall): Record<string, unknown> {
@@ -64,6 +71,16 @@ export type LlmResult<T> = {
   latencyMs: number;
 };
 
+type Usage = { inputTokens?: number; outputTokens?: number };
+
+function usageOf(json: unknown): Usage {
+  const u = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number } })?.usage;
+  return {
+    inputTokens: typeof u?.prompt_tokens === "number" ? u.prompt_tokens : undefined,
+    outputTokens: typeof u?.completion_tokens === "number" ? u.completion_tokens : undefined,
+  };
+}
+
 /** Single JSON-mode chat completion. Never throws — callers branch on `ok`. */
 export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
   const started = Date.now();
@@ -74,6 +91,7 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
   const model = await modelFor(call.tier ?? "reason");
   const attempts = (call.retries ?? 2) + 1;
   let lastError = "unknown";
+  let usage: Usage | undefined;
 
   /** Honour Retry-After when the API sends it, else back off exponentially. */
   const wait = async (res: Response | null, attempt: number) => {
@@ -109,22 +127,43 @@ export async function chatJson<T>(call: LlmCall): Promise<LlmResult<T>> {
         continue;
       }
       const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      usage = usageOf(json);
       const content = json.choices?.[0]?.message?.content;
       if (!content) {
         lastError = "empty-response";
         continue;
       }
+      const latencyMs = Date.now() - started;
+      void recordAiCall({
+        feature: call.feature ?? "unknown",
+        model,
+        ok: true,
+        latencyMs,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        sessionId: call.sessionId,
+      });
       return {
         ok: true,
         data: JSON.parse(content) as T,
         model,
-        latencyMs: Date.now() - started,
+        latencyMs,
       };
     } catch (err) {
       lastError = err instanceof Error ? err.name : "exception";
       if (attempt < attempts - 1) await wait(null, attempt);
     }
   }
+  void recordAiCall({
+    feature: call.feature ?? "unknown",
+    model,
+    ok: false,
+    error: lastError,
+    latencyMs: Date.now() - started,
+    inputTokens: usage?.inputTokens,
+    outputTokens: usage?.outputTokens,
+    sessionId: call.sessionId,
+  });
   return { ok: false, error: lastError, model, latencyMs: Date.now() - started };
 }
 
@@ -197,7 +236,8 @@ export type StreamingCall = LlmCall & {
 /**
  * Same contract as `chatJson`, but the response is streamed so the caller can
  * surface prose while the model is still writing. Falls back to a plain call if
- * streaming fails.
+ * streaming fails (the fallback logs its own telemetry, so only successes are
+ * recorded here).
  */
 export async function chatJsonStreaming<T>(call: StreamingCall): Promise<LlmResult<T>> {
   const started = Date.now();
@@ -256,9 +296,92 @@ export async function chatJsonStreaming<T>(call: StreamingCall): Promise<LlmResu
       }
     }
 
-    return { ok: true, data: JSON.parse(content) as T, model, latencyMs: Date.now() - started };
+    const latencyMs = Date.now() - started;
+    void recordAiCall({
+      feature: call.feature ?? "unknown",
+      model,
+      ok: true,
+      latencyMs,
+      sessionId: call.sessionId,
+    });
+    return { ok: true, data: JSON.parse(content) as T, model, latencyMs };
   } catch {
     // Streaming is an optimisation, never a dependency.
     return chatJson<T>(call);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Prose                                                               */
+/* ------------------------------------------------------------------ */
+
+export type LlmTextResult = LlmResult<string>;
+
+/**
+ * Plain prose completion for narrative surfaces (briefings, narratives) that
+ * have no use for JSON mode. Never throws.
+ */
+export async function chatText(call: LlmCall): Promise<LlmTextResult> {
+  const started = Date.now();
+  const key = await getOpenAiKey();
+  if (!key.startsWith("sk-")) {
+    return { ok: false, error: "no-api-key", latencyMs: 0 };
+  }
+  const model = await modelFor(call.tier ?? "reason");
+  const attempts = (call.retries ?? 1) + 1;
+  let lastError = "unknown";
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          temperature: call.temperature ?? 0.3,
+          max_tokens: call.maxTokens ?? 400,
+          messages: [
+            { role: "system", content: call.system },
+            { role: "user", content: call.user },
+          ],
+        }),
+        signal: AbortSignal.timeout(call.timeoutMs ?? 20000),
+      });
+      if (!res.ok) {
+        lastError = `http-${res.status}`;
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+        if (attempt < attempts - 1) await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+        continue;
+      }
+      const json = (await res.json()) as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      const content = json.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        lastError = "empty-response";
+        continue;
+      }
+      const latencyMs = Date.now() - started;
+      void recordAiCall({
+        feature: call.feature ?? "unknown",
+        model,
+        ok: true,
+        latencyMs,
+        inputTokens: json.usage?.prompt_tokens,
+        outputTokens: json.usage?.completion_tokens,
+        sessionId: call.sessionId,
+      });
+      return { ok: true, data: content, model, latencyMs };
+    } catch (err) {
+      lastError = err instanceof Error ? err.name : "exception";
+      if (attempt < attempts - 1) await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+    }
+  }
+  void recordAiCall({
+    feature: call.feature ?? "unknown",
+    model,
+    ok: false,
+    error: lastError,
+    latencyMs: Date.now() - started,
+    sessionId: call.sessionId,
+  });
+  return { ok: false, error: lastError, model, latencyMs: Date.now() - started };
 }

@@ -4,18 +4,25 @@ import {
   reviewMessage,
   startSession,
   assistantMessage,
+  valueToWords,
+  markSlotSource,
+  slotSource,
+  HUMAN_LOCKED_SLOTS,
   type EngineContext,
   type EngineInput,
   type EngineResult,
   type IntakeState,
+  type SlotSource,
 } from "./chat-engine";
 import { CATEGORY_DEPARTMENT } from "./org";
 import { CATEGORY_META } from "./taxonomy";
 import { applyComposerContext, IMPACT_LABEL } from "./chat-inference";
-import { runAgent, questionOptions, type AgentContext, type AgentQuestion } from "./agent";
-import { missingRequired, questionBudget } from "./guardrails";
+import { runAgent, generateSummary, questionOptions, CANONICAL_SLOTS, type AgentContext, type AgentQuestion } from "./agent";
+import { missingRequired, normaliseRaisedFor, questionBudget } from "./guardrails";
 import { insightFromAgent } from "./enrich";
 import { findRelatedTickets } from "./recurrence";
+import { findContextFacts } from "./memory";
+import { istDate, resolveWhenToDate, rowDateToIso } from "./time";
 import { momenceAvailable, runTools, type ToolResult } from "./agent-tools";
 import type { ChatMessage, ChatOption } from "./types";
 
@@ -37,6 +44,72 @@ function isDeterministic(state: IntakeState, input: EngineInput): boolean {
 /* Structured input → state, and → words the agent can read            */
 /* ------------------------------------------------------------------ */
 
+const CANONICAL_SLOT_IDS = new Set<string>(CANONICAL_SLOTS);
+
+/**
+ * Option answers, in two shapes: `ans:<slotId>|<label>` names the slot
+ * explicitly (gates), and plain `ans:<label>` binds to the question currently
+ * pending when that question is a canonical slot. Both fill the slot in code
+ * *and* speak the words, so a tap is never a silent no-op.
+ */
+function absorbExplicitAnswer(
+  value: string,
+  s: IntakeState,
+): { slot: string; label: string } | null {
+  if (!value.startsWith("ans:")) return null;
+  const rest = value.slice(4);
+  const sep = rest.indexOf("|");
+  let id: string;
+  let label: string;
+  if (sep !== -1) {
+    id = rest.slice(0, sep);
+    label = rest.slice(sep + 1);
+  } else {
+    label = rest;
+    const pending = s.pendingQuestionId ?? null;
+    if (!pending || !CANONICAL_SLOT_IDS.has(pending)) return { slot: "", label };
+    id = pending;
+  }
+  if (!id || !label) return { slot: "", label };
+  const slot = id === "resolved" ? "resolvedNow" : id;
+  applyAnswerToSlot(slot, label, s);
+  markSlotSource(s, slot, "user");
+  return { slot, label };
+}
+
+/** Deterministic mapping from a canonical slot id to a tapped option label. */
+function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
+  const d = s.data;
+  const v = label.trim();
+  if (!v) return;
+  switch (slot) {
+    case "raisedFor": d.raisedFor = normaliseRaisedFor(v); break;
+    case "impact": {
+      // Option labels are English sentences; the stored value is the stable key.
+      const key = ["safety", "many", "single", "suggestion"].find((k) =>
+        k === "many"
+          ? /several|many|multiple/i.test(v)
+          : k === "single"
+            ? /one member|minor|single/i.test(v)
+            : v.toLowerCase().includes(k),
+      );
+      d.impact = key ?? "single";
+      break;
+    }
+    case "resolvedNow": d.resolvedNow = /^(yes|true|resolved|fixed|it'?s (fixed|resolved|fine now))$/i.test(v); break;
+    case "atRisk": d.atRisk = /^(yes|true)/i.test(v); break;
+    case "frequency": d.frequency = v; break;
+    case "occurredAt": d.occurredAt = v; break;
+    case "location": d.location = v; break;
+    case "systemAffected": d.systemAffected = v; break;
+    case "classInfo": d.classInfo = v; break;
+    case "membershipRef": d.membershipRef = v; break;
+    case "trainer": d.trainerName = v; break;
+    case "member": d.memberName = v; break;
+    default: break; // custom:* and unknown ids ride along as words only
+  }
+}
+
 /**
  * Picker and option clicks are applied deterministically *and* converted into a
  * plain-language utterance, so the transcript the agent reads is always the
@@ -52,10 +125,25 @@ function absorbInput(
   const d = s.data;
   const inferred = input.context ? applyComposerContext(input.context, s) : [];
 
+  const explicit = absorbExplicitAnswer(value, s);
+  if (explicit) {
+    return { utterance: explicit.label, inferred };
+  }
+
   if (value.startsWith("ans:")) return { utterance: value.slice(4), inferred };
+
+  if (value === "resolvedNow:yes" || value === "resolvedNow:no") {
+    d.resolvedNow = value === "resolvedNow:yes";
+    markSlotSource(s, "resolvedNow", "user");
+    return {
+      utterance: d.resolvedNow ? "It is resolved / fixed now." : "It is still happening — not resolved.",
+      inferred,
+    };
+  }
 
   if (value.startsWith("studio:")) {
     const rest = value.slice(7);
+    markSlotSource(s, "studio", "user");
     if (rest === "none") {
       d.studioId = null;
       d.studioName = "Not studio specific";
@@ -78,6 +166,7 @@ function absorbInput(
     } else {
       d.memberName = value.slice(7);
     }
+    markSlotSource(s, ["member", "momenceMemberId"], "user");
     return { utterance: `The member is ${d.memberName}.`, inferred };
   }
 
@@ -88,6 +177,7 @@ function absorbInput(
     d.classInfo = name;
     if (at) d.classAt = at;
     if (teacher && !d.trainerName) d.trainerName = teacher;
+    markSlotSource(s, ["momenceSessionId", "classInfo"], "user");
     return {
       utterance: `The class was ${[name, at, teacher && `taught by ${teacher}`].filter(Boolean).join(", ")}.`,
       inferred,
@@ -96,11 +186,13 @@ function absorbInput(
 
   if (value.startsWith("trainer:")) {
     d.trainerName = value.slice(8);
+    markSlotSource(s, "trainerName", "user");
     return { utterance: `The trainer was ${d.trainerName}.`, inferred };
   }
 
   if (value.startsWith("membership:") || value.startsWith("mem:")) {
     d.membershipRef = value.replace(/^(membership|mem):/, "");
+    markSlotSource(s, "membershipRef", "user");
     return { utterance: `Membership: ${d.membershipRef}.`, inferred };
   }
 
@@ -109,10 +201,12 @@ function absorbInput(
   if (value.startsWith("cat:")) {
     d.category = value.slice(4);
     d.subcategory = undefined;
+    markSlotSource(s, "category", "user");
     return { utterance: `File this under ${d.category}.`, inferred };
   }
   if (value.startsWith("sub:")) {
     d.subcategory = value.slice(4);
+    markSlotSource(s, "subcategory", "user");
     return { utterance: `The subcategory is ${d.subcategory}.`, inferred };
   }
 
@@ -164,6 +258,9 @@ function applySlots(
   allowOverwrite = false,
 ): void {
   const d = s.data;
+  const locked = (slot: string): boolean =>
+    !allowOverwrite && (slotSource(s, slot) === "user" || slotSource(s, slot) === "context");
+
   for (const [slot, entry] of Object.entries(slots)) {
     const v = entry?.value;
     if (v === null || v === undefined || v === "") continue;
@@ -171,7 +268,7 @@ function applySlots(
 
     switch (slot) {
       case "studio": {
-        if (d.studioName !== undefined && !allowOverwrite) break; // explicit context wins unless corrected
+        if (locked("studio") || (d.studioName !== undefined && !allowOverwrite)) break; // explicit context wins unless corrected
         const match = resolveStudio(str, ctx.studios);
         if (match) {
           d.studioId = match.id;
@@ -182,11 +279,16 @@ function applySlots(
         }
         break;
       }
-      case "raisedFor": d.raisedFor = str; break;
-      case "member": d.memberName = str; break;
-      case "memberContact": d.memberContact = str; break;
-      case "trainer": d.trainerName = str; break;
+      case "raisedFor": {
+        if (locked("raisedFor")) break;
+        d.raisedFor = normaliseRaisedFor(str);
+        break;
+      }
+      case "member": if (locked("member")) break; d.memberName = str; break;
+      case "memberContact": if (locked("memberContact")) break; d.memberContact = str; break;
+      case "trainer": if (locked("trainerName")) break; d.trainerName = str; break;
       case "classInfo": {
+        if (locked("classInfo")) break;
         // A session resolved against Momence outranks the reporter's shorthand.
         if (d.momenceSessionId && d.classInfo && !allowOverwrite) break;
         if (allowOverwrite) {
@@ -198,27 +300,45 @@ function applySlots(
         break;
       }
       case "location": {
+        if (locked("location")) break;
         // The studio itself is not an area within the studio.
         if (resolveStudio(str, ctx.studios)) break;
         d.location = str;
         break;
       }
-      case "systemAffected": d.systemAffected = str; break;
-      case "membershipRef": d.membershipRef = str; break;
-      case "occurredAt": d.occurredAt = str; break;
-      case "impact": d.impact = str; break;
-      case "atRisk": d.atRisk = v === true || /^(true|yes)$/i.test(str); break;
-      case "frequency": d.frequency = str; break;
+      case "systemAffected": if (locked("systemAffected")) break; d.systemAffected = str; break;
+      case "membershipRef": if (locked("membershipRef")) break; d.membershipRef = str; break;
+      case "occurredAt": if (locked("occurredAt")) break; d.occurredAt = str; break;
+      case "impact": {
+        if (locked("impact")) break;
+        const key = ["safety", "many", "single", "suggestion"].find((k) => str.toLowerCase().includes(k));
+        if (key) d.impact = key;
+        break;
+      }
+      case "atRisk":
+        if (locked("atRisk")) break;
+        d.atRisk = v === true || /^(true|yes)$/i.test(str);
+        break;
+      case "resolvedNow": {
+        if (locked("resolvedNow")) break;
+        if (typeof v === "boolean") d.resolvedNow = v;
+        else if (/^(true|yes|resolved|fixed|it'?s fine)/i.test(str.trim())) d.resolvedNow = true;
+        else if (/^(false|no|not resolved|still)/i.test(str.trim())) d.resolvedNow = false;
+        break;
+      }
+      case "frequency": if (locked("frequency")) break; d.frequency = str; break;
       case "actionTaken": d.actionTaken = str; break;
       case "witnesses": d.witnesses = str; break;
       case "amount": d.amount = str; break;
       case "notes": d.notes = str; break;
       case "momenceSessionId": {
+        if (locked("momenceSessionId")) break;
         const id = Number(str);
         if (Number.isFinite(id) && id > 0) d.momenceSessionId = id;
         break;
       }
       case "momenceMemberId": {
+        if (locked("momenceMemberId")) break;
         const id = Number(str);
         if (Number.isFinite(id) && id > 0) d.momenceMemberId = id;
         break;
@@ -233,6 +353,37 @@ function applySlots(
         }
       }
     }
+  }
+}
+
+/**
+ * Apply explicit model-reported corrections. These are the one channel that may
+ * overwrite human-locked slots, because each correction names the slot the
+ * reporter revised. Corrected values re-lock to the human side: the reporter's
+ * newest word is their word.
+ */
+function applyCorrections(
+  corrections: { slot: string; value: string; quote?: string }[] | undefined,
+  s: IntakeState,
+  ctx: EngineContext,
+): void {
+  if (!corrections?.length) return;
+  for (const c of corrections) {
+    const slot = c.slot.trim();
+    if (!slot || c.value === undefined || c.value === null || String(c.value).trim() === "") continue;
+    if (slot.startsWith("custom:")) {
+      const label = slot
+        .slice(7)
+        .replace(/[_-]+/g, " ")
+        .replace(/^\w/, (ch) => ch.toUpperCase());
+      s.data.extraDetails = { ...(s.data.extraDetails ?? {}), [label]: String(c.value) };
+      continue;
+    }
+    const wrapper: Record<string, { value: string | boolean | null; quote?: string }> = {
+      [slot]: { value: c.value, quote: c.quote },
+    };
+    applySlots(wrapper, s, ctx, true);
+    markSlotSource(s, slot, "user");
   }
 }
 
@@ -256,13 +407,10 @@ function sessionQuery(
     .trim();
   if (query.length < 3) return null;
 
+  // Resolve the reported day on the IST calendar — the same clock the agent
+  // prompt reasons with. "Today" at 1am IST must search today, not yesterday.
   const occurred = String(slots.occurredAt?.value ?? s.data.occurredAt ?? "");
-  const today = new Date().toISOString().slice(0, 10);
-  const date = /just now|today|this morning|this afternoon|this evening|tonight/i.test(occurred)
-    ? today
-    : /yesterday/i.test(occurred)
-      ? new Date(Date.now() - 86400000).toISOString().slice(0, 10)
-      : undefined;
+  const date = resolveWhenToDate(occurred);
 
   const locationId = studios.find((st) => st.id === s.data.studioId)?.momenceLocationId ?? undefined;
 
@@ -304,31 +452,54 @@ function normaliseTime(value: string): string {
 /**
  * Pick the session a report is talking about, but only when it is beyond doubt:
  * exactly one row whose start time matches a time the reporter gave, or a single
- * row overall. Anything ambiguous is left for the agent (or the reporter) to
- * resolve — a wrong session id on a ticket is worse than no session id.
+ * row overall — and, when the report day is known, only rows from that day.
+ * Anything ambiguous is left for the agent (or the reporter) to resolve — a
+ * wrong session id on a ticket is worse than no session id.
  */
-export function matchSession(rows: SessionRow[], reportText: string): SessionRow | null {
+export function matchSession(
+  rows: SessionRow[],
+  reportText: string,
+  occurredAtIso?: string,
+): SessionRow | null {
   if (rows.length === 0) return null;
+
+  // Date agreement first: a session on another day is never the one reported,
+  // however well the clock time lines up. When the rows carry readable dates
+  // and none match the reported day, there is simply no candidate.
+  let candidates = rows;
+  if (occurredAtIso) {
+    const dated = rows.filter((row) => rowDateToIso(row.label) !== undefined);
+    if (dated.length > 0) candidates = dated.filter((row) => rowDateToIso(row.label) === occurredAtIso);
+  }
 
   const times = new Set(reportedTimes(reportText));
   if (times.size > 0) {
-    const hits = rows.filter((row) => row.time && times.has(normaliseTime(row.time)));
+    const hits = candidates.filter((row) => row.time && times.has(normaliseTime(row.time)));
     return hits.length === 1 ? hits[0] : null;
   }
-  return rows.length === 1 ? rows[0] : null;
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
-function knownForAgent(s: IntakeState): Record<string, string> {
+function knownForAgent(s: IntakeState): {
+  known: Record<string, string>;
+  humanLocked: string[];
+} {
   const d = s.data;
   const known: Record<string, string> = {};
-  const put = (k: string, v: unknown) => {
-    if (v !== undefined && v !== null && v !== "") known[k] = String(v);
+  const humanLocked: string[] = [];
+  const put = (k: string, v: unknown, humanKey?: string) => {
+    if (v !== undefined && v !== null && v !== "") {
+      known[k] = String(v);
+      const src = slotSource(s, humanKey ?? k);
+      if (src === "user" || src === "context") humanLocked.push(k);
+    }
   };
   put("studio", d.studioName);
   put("raisedFor", d.raisedFor);
+  put("category", d.category ? (d.subcategory ? `${d.category} › ${d.subcategory}` : d.category) : undefined);
   put("member", d.memberName);
   put("memberContact", d.memberContact);
-  put("trainer", d.trainerName);
+  put("trainer", d.trainerName, "trainerName");
   put("classInfo", d.classInfo);
   put("momenceSessionId", d.momenceSessionId);
   put("momenceMemberId", d.momenceMemberId);
@@ -339,13 +510,17 @@ function knownForAgent(s: IntakeState): Record<string, string> {
   put("occurredAt", d.occurredAt);
   put("impact", d.impact ? (IMPACT_LABEL[d.impact] ?? d.impact) : undefined);
   put("atRisk", d.atRisk);
+  put(
+    "resolvedNow",
+    d.resolvedNow !== undefined ? (d.resolvedNow ? "yes — resolved/fixed" : "no — still happening") : undefined,
+  );
   put("frequency", d.frequency);
   put("actionTaken", d.actionTaken);
   put("witnesses", d.witnesses);
   put("amount", d.amount);
   put("notes", d.notes);
   for (const [k, v] of Object.entries(d.extraDetails ?? {})) put(k, v);
-  return known;
+  return { known, humanLocked };
 }
 
 /* ------------------------------------------------------------------ */
@@ -441,6 +616,10 @@ export async function runAgentTurn(
     data: { ...state.data },
     suggestions: [...state.suggestions],
     agentAsked: [...(state.agentAsked ?? [])],
+    slotSources: { ...(state.slotSources ?? {}) },
+    // An answer to an edit-menu question is an agent turn — the deterministic
+    // edit machinery owns the field only while it is asking.
+    editingField: null,
   };
 
   const { utterance, inferred } = absorbInput(input, s, ctx);
@@ -490,10 +669,20 @@ export async function runAgentTurn(
   const toolsEnabled = await momenceAvailable().catch(() => false);
   const toolResults: ToolResult[] = [...(s.toolResults ?? [])];
 
+  // Recall what the organisation already knows about this studio / member so
+  // the agent never re-asks for history that is on file.
+  hooks.onStatus?.("Recalling studio history");
+  const memoryFacts = await findContextFacts({
+    studioId: s.data.studioId,
+    memberName: s.data.memberName,
+  }).catch(() => []);
+
+  const { known, humanLocked } = knownForAgent(s);
   const agentCtx: AgentContext = {
     reporter: ctx.reporter,
     studios: ctx.studios.map((st) => ({ id: st.id, name: st.name, city: st.city, isHq: st.isHq })),
-    known: knownForAgent(s),
+    known,
+    humanLocked,
     asked: s.agentAsked ?? [],
     questionBudget: budget,
     relatedTickets: related.map((r) => ({
@@ -502,9 +691,12 @@ export async function runAgentTurn(
       createdAt: r.createdAt,
       status: r.status,
     })),
+    memoryFacts,
     momenceNote: s.data.momenceContext ? JSON.stringify(s.data.momenceContext) : undefined,
     toolsEnabled,
     toolResults,
+    summaryCompression: s.contextSummary,
+    sessionId: input.sessionId,
   };
 
   hooks.onStatus?.("Reading your report");
@@ -543,12 +735,32 @@ export async function runAgentTurn(
     hooks.onReplyRestart?.();
     const next = await runAgent(
       convo,
-      { ...agentCtx, known: knownForAgent(s), toolResults },
+      { ...agentCtx, known: knownForAgent(s).known, toolResults },
       { onReplyDelta: hooks.onReplyDelta },
     );
     if (!next.ok || !next.turn) break;
     result = next;
   }
+
+  // The model must never burn a question on facts Momence holds. When a member
+  // is named but has no id yet, resolve them once — the roster record carries
+  // the real spelling, contact and membership that the ticket should carry.
+  if (toolsEnabled && result.turn && !s.data.momenceMemberId && !s.memberLookupDone) {
+    const memberName = s.data.memberName?.trim();
+    if (memberName && !/anonymous|not specified/i.test(memberName)) {
+      hooks.onStatus?.("Finding the member in Momence");
+      s.memberLookupDone = true;
+      toolResults.push(...(await runTools([{ tool: "search_member", args: { query: memberName } }])));
+      hooks.onReplyRestart?.();
+      const next = await runAgent(
+        convo,
+        { ...agentCtx, known: knownForAgent(s).known, toolResults },
+        { onReplyDelta: hooks.onReplyDelta },
+      );
+      if (next.ok && next.turn) result = next;
+    }
+  }
+
   // Resolving a named class to a real Momence session is the point of the
   // integration, and the model does it only sometimes. So: make sure the lookup
   // happens, then pick the row in code whenever the answer is unambiguous.
@@ -569,10 +781,12 @@ export async function runAgentTurn(
       .filter((r) => r.tool === "find_sessions")
       .flatMap((r) => parseSessionRows(r.result));
     const reported = `${String(result.turn.slots.classInfo?.value ?? s.data.classInfo ?? "")} ${narrative}`;
-    const hit = matchSession(rows, reported);
+    const occurredIso = resolveWhenToDate(s.data.occurredAt ?? String(result.turn.slots.occurredAt?.value ?? ""));
+    const hit = matchSession(rows, reported, occurredIso);
     if (hit) {
       s.data.momenceSessionId = hit.id;
       s.data.classInfo = hit.label;
+      markSlotSource(s, ["momenceSessionId", "classInfo"], "derived");
       s.data.momenceContext = {
         ...(s.data.momenceContext ?? {}),
         sessionId: hit.id,
@@ -585,7 +799,7 @@ export async function runAgentTurn(
       hooks.onReplyRestart?.();
       const next = await runAgent(
         convo,
-        { ...agentCtx, known: knownForAgent(s), toolResults },
+        { ...agentCtx, known: knownForAgent(s).known, toolResults },
         { onReplyDelta: hooks.onReplyDelta },
       );
       if (next.ok && next.turn) result = next;
@@ -597,12 +811,20 @@ export async function runAgentTurn(
   const turn = result.turn!;
   // A model that keeps asking for lookups past the cap must still move on.
   if (turn.toolCalls?.length) turn.toolCalls = [];
-  if (!s.data.category || turn.classification.confidence >= 0.5) {
+
+  // A human-set category (button, context bar) is never silently re-classified;
+  // a machine judgement must also be a confident one to take the slot.
+  const categoryLocked = slotSource(s, "category") === "user" || slotSource(s, "category") === "context";
+  if (!s.data.category || (!categoryLocked && turn.classification.confidence >= 0.5)) {
     s.data.category = turn.classification.category;
     s.data.subcategory = turn.classification.subcategory;
+    if (!categoryLocked) markSlotSource(s, ["category", "subcategory"], "agent");
   }
-  const isCorrection = /\b(actually|correction|correct that|i meant|rather than|not .+[,;] (?:it(?:'s| is)|the)|scratch that)\b/i.test(utterance);
-  applySlots(turn.slots, s, ctx, isCorrection);
+
+  // Corrections are the model's explicit record that the reporter revised an
+  // earlier fact — they may override anything, then re-lock to the human side.
+  applyCorrections(turn.corrections, s, ctx);
+  applySlots(turn.slots, s, ctx, false);
   if (turn.extraDetails && Object.keys(turn.extraDetails).length) {
     s.data.extraDetails = { ...(s.data.extraDetails ?? {}), ...turn.extraDetails };
   }
@@ -633,22 +855,48 @@ export async function runAgentTurn(
     if (missing.includes("studio")) question = { ...question, id: "studio", allowFreeText: false };
   }
 
-  // Studio drives routing, so it is the one thing we will always ask for.
-  if (!question && missing.includes("studio")) {
-    question = { id: "studio", ask: "Last thing — which studio is this?", allowFreeText: false };
+  // Owner-critical gates. Routing, live-vs-resolved and blast radius change
+  // what the owner physically does, so they outrank the question budget: one
+  // focused question each, never the same one twice, with concrete options.
+  const GATE_ASK: Record<string, string> = {
+    studio: "Last thing — which studio is this?",
+    impact: "How wide is the impact — safety risk, several members, one member, or a suggestion?",
+    resolvedNow: "Is this resolved now, or still happening?",
+  };
+  if (missing.includes("studio") && !(s.agentAsked ?? []).includes("studio")) {
+    // Studio drives routing — it overrides whatever the model asked this turn.
+    question = { id: "studio", ask: GATE_ASK.studio, allowFreeText: false };
+  } else if (!question) {
+    for (const gate of ["resolvedNow", "impact"] as const) {
+      if (!missing.includes(gate) || (s.agentAsked ?? []).includes(gate)) continue;
+      question = {
+        id: gate,
+        ask: GATE_ASK[gate],
+        allowFreeText: true,
+        ...(gate === "impact"
+          ? { options: ["Safety risk / classes blocked", "Several members affected", "One member / minor disruption", "Suggestion or idea"].map((label) => ({ label, value: `ans:impact|${label}` })) }
+          : {
+              options: [
+                { label: "Resolved / fixed now", value: "ans:resolved|Yes — resolved" },
+                { label: "Still happening", value: "ans:resolved|No — still happening" },
+              ],
+            }),
+      };
+      break;
+    }
   }
 
   // Never ask the same thing twice. If the answer did not land the first time,
   // asking again just loops the reporter — take what we have and draft.
   if (question && (s.agentAsked ?? []).includes(question.id)) {
-    question =
-      question.id !== "studio" && missing.includes("studio")
-        ? { id: "studio", ask: "Last thing — which studio is this?", allowFreeText: false }
-        : null;
-    if (question && (s.agentAsked ?? []).includes(question.id)) question = null;
+    question = null;
   }
 
-  if (budgetSpent && question && !missing.includes("studio")) question = null;
+  // The budget suppresses optional questions only — routing and the two
+  // owner-critical gates always get their one focused ask.
+  if (budgetSpent && question && !["studio", "impact", "resolvedNow"].includes(question.id)) {
+    question = null;
+  }
 
   const first = (state.agentAsked?.length ?? 0) === 0 && state.step === "describe";
 
@@ -696,6 +944,19 @@ export async function runAgentTurn(
   s.step = "review";
   s.insight = insight;
   s.pendingQuestionId = null;
+
+  // Park a compressed form of the conversation on the session: if the reporter
+  // edits and returns, later model calls keep the whole narrative in a few
+  // sentences instead of losing it to the transcript window.
+  if (convo.length > 6 || turn.summaryCompression) {
+    const summary = await generateSummary(turn.summaryCompression ?? s.contextSummary, convo).catch(
+      () => s.contextSummary,
+    );
+    if (summary) {
+      s.contextSummary = summary;
+      s.summaryCovered = convo.length;
+    }
+  }
 
   const messages: ChatMessage[] = [];
   if (turn.reply) {

@@ -336,6 +336,18 @@ export async function importHistoricTickets(
     }
   }
 
+  // Backfill semantic embeddings so historic tickets are searchable by meaning
+  // from day one — best-effort; the lexical fallback covers any shortfall.
+  try {
+    const { backfillTicketEmbeddings } = await import("./recurrence");
+    for (let done = 0; done < summary.imported; done += 120) {
+      const n = await backfillTicketEmbeddings(120);
+      if (n === 0) break;
+    }
+  } catch {
+    // Embeddings are an upgrade, never a requirement.
+  }
+
   return summary;
 }
 

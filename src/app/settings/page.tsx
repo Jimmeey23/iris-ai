@@ -23,7 +23,7 @@ export default async function SettingsPage() {
         initial={{
           ...raw,
           openai_api_key: maskSecret(raw.openai_api_key ?? ""),
-          openai_model: raw.openai_model ?? "gpt-4o-mini",
+          openai_model: raw.openai_model ?? "gpt-4.1",
           momence_client_secret: maskSecret(raw.momence_client_secret ?? ""),
           momence_password: maskSecret(raw.momence_password ?? ""),
           fillout_supabase_token: maskSecret(raw.fillout_supabase_token ?? ""),

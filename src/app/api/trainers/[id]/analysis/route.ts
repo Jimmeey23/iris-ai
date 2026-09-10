@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { classFeedback, tickets, trainerAnalysis, trainerEvaluations, trainers } from "@/db/schema";
-import { getOpenAiKey, getSetting } from "@/lib/settings";
+import { getOpenAiKey } from "@/lib/settings";
+import { chatJson, modelFor } from "@/lib/llm";
 import { linearFit } from "@/lib/forecast";
 
 export const dynamic = "force-dynamic";
@@ -158,52 +159,40 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return NextResponse.json(await persist(base));
   }
 
-  const model = (await getSetting("openai_model")) || "gpt-4o-mini";
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        temperature: 0.35,
-        max_tokens: 620,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are the head of training at Physique 57, a boutique barre studio group in India. Write a candid, specific performance analysis for one instructor. Return JSON {headline, narrative, strengths[], priorities[], coachingPlan:[{horizon,action}]}. headline is at most 10 words and must not repeat the word 'Performance Analysis'. narrative is 3-4 sentences of prose. strengths and priorities are 3 items each, each naming a rubric criterion and its attainment number. coachingPlan has exactly 3 entries with horizons 'This week', 'This month', 'Next review'. Be direct, never generic, use British English, never invent data. Do not return a trajectory field.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              trainer: trainer.name,
-              studio: trainer.homeStudio,
-              formats: trainer.formats,
-              assessments: sorted.map((e) => ({
-                at: e.submittedAt,
-                score: e.scorePercent,
-                band: e.band,
-                template: e.template,
-                evaluator: e.evaluator,
-                focus: e.focusPoints,
-                comments: e.comments,
-              })),
-              rubricAttainment: rubric,
-              memberFeedback: {
-                positive: myTickets.filter((t) => t.sentiment === "Positive").length,
-                negative: myTickets.filter((t) => t.sentiment === "Negative" || t.sentiment === "Escalated").length,
-                themes: [...new Set(myTickets.map((t) => t.subcategory))].slice(0, 6),
-              },
-            }),
-          },
-        ],
+  const model = await modelFor("reason");
+  {
+    const res = await chatJson<Analysis>({
+      system:
+        "You are the head of training at Physique 57, a boutique barre studio group in India. Write a candid, specific performance analysis for one instructor. Return JSON {headline, narrative, strengths[], priorities[], coachingPlan:[{horizon,action}]}. headline is at most 10 words and must not repeat the word 'Performance Analysis'. narrative is 3-4 sentences of prose. strengths and priorities are 3 items each, each naming a rubric criterion and its attainment number. coachingPlan has exactly 3 entries with horizons 'This week', 'This month', 'Next review'. Be direct, never generic, use British English, never invent data. Do not return a trajectory field.",
+      user: JSON.stringify({
+        trainer: trainer.name,
+        studio: trainer.homeStudio,
+        formats: trainer.formats,
+        assessments: sorted.map((e) => ({
+          at: e.submittedAt,
+          score: e.scorePercent,
+          band: e.band,
+          template: e.template,
+          evaluator: e.evaluator,
+          focus: e.focusPoints,
+          comments: e.comments,
+        })),
+        rubricAttainment: rubric,
+        memberFeedback: {
+          positive: myTickets.filter((t) => t.sentiment === "Positive").length,
+          negative: myTickets.filter((t) => t.sentiment === "Negative" || t.sentiment === "Escalated").length,
+          themes: [...new Set(myTickets.map((t) => t.subcategory))].slice(0, 6),
+        },
       }),
-      signal: AbortSignal.timeout(22000),
+      tier: "reason",
+      temperature: 0.35,
+      maxTokens: 900,
+      timeoutMs: 22000,
+      retries: 0,
+      feature: "trainer-analysis",
     });
-    if (!res.ok) return NextResponse.json(await persist(base));
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const parsed = JSON.parse(json.choices?.[0]?.message?.content ?? "{}") as Partial<Analysis>;
+    const parsed = res.data;
+    if (!res.ok || !parsed) return NextResponse.json(await persist(base));
     const merged: Analysis = {
       ...base,
       headline: parsed.headline?.trim() || base.headline,
@@ -216,7 +205,5 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       engine: `OpenAI ${model}`,
     };
     return NextResponse.json(await persist(merged));
-  } catch {
-    return NextResponse.json(await persist(base));
   }
 }

@@ -3,7 +3,8 @@ import { db } from "@/db";
 import { tickets, trainerEvaluations } from "@/db/schema";
 import { ensureSeeded } from "@/lib/seed";
 import { buildForecast } from "@/lib/forecast";
-import { getOpenAiKey, getSetting } from "@/lib/settings";
+import { getOpenAiKey } from "@/lib/settings";
+import { chatText, modelFor } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 
@@ -25,49 +26,34 @@ export async function GET(request: Request) {
   let engine = "Iris forecasting (on-device)";
   const key = await getOpenAiKey();
   if (key.startsWith("sk-") && searchParams.get("narrative") !== "0") {
-    const model = (await getSetting("openai_model")) || "gpt-4o-mini";
-    try {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model,
-          temperature: 0.35,
-          max_tokens: 320,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are the operations analyst for Physique 57, a boutique barre studio group in India. Given computed forecast signals, write a 3-4 sentence executive briefing for the leadership team. Lead with the single most important thing, quantify it, and finish with the one action to take this week. British English, no bullet points, no preamble.",
-            },
-            {
-              role: "user",
-              content: JSON.stringify({
-                volume: bundle.volume,
-                backlog: bundle.backlog,
-                slaRisk: {
-                  atRisk: bundle.slaRisk.atRisk.length,
-                  breachedNow: bundle.slaRisk.breachedNow,
-                  predicted: bundle.slaRisk.predictedBreaches7,
-                  compliance: bundle.slaRisk.complianceForecast,
-                },
-                churn: bundle.churn.members.slice(0, 4),
-                trainersAtRisk: bundle.trainers.filter((t) => t.risk === "high" || t.risk === "watch").slice(0, 4),
-                hotspots: bundle.hotspots.slice(0, 4),
-                signals: bundle.signals.slice(0, 6).map((s) => ({ t: s.title, d: s.detail })),
-              }),
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(18000),
-      });
-      if (res.ok) {
-        const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-        narrative = json.choices?.[0]?.message?.content?.trim() ?? null;
-        if (narrative) engine = `OpenAI ${model}`;
-      }
-    } catch {
-      /* fall back to computed signals only */
+    const model = await modelFor("reason");
+    const res = await chatText({
+      system:
+        "You are the operations analyst for Physique 57, a boutique barre studio group in India. Given computed forecast signals, write a 3-4 sentence executive briefing for the leadership team. Lead with the single most important thing, quantify it, and finish with the one action to take this week. British English, no bullet points, no preamble.",
+      user: JSON.stringify({
+        volume: bundle.volume,
+        backlog: bundle.backlog,
+        slaRisk: {
+          atRisk: bundle.slaRisk.atRisk.length,
+          breachedNow: bundle.slaRisk.breachedNow,
+          predicted: bundle.slaRisk.predictedBreaches7,
+          compliance: bundle.slaRisk.complianceForecast,
+        },
+        churn: bundle.churn.members.slice(0, 4),
+        trainersAtRisk: bundle.trainers.filter((t) => t.risk === "high" || t.risk === "watch").slice(0, 4),
+        hotspots: bundle.hotspots.slice(0, 4),
+        signals: bundle.signals.slice(0, 6).map((s) => ({ t: s.title, d: s.detail })),
+      }),
+      tier: "reason",
+      temperature: 0.35,
+      maxTokens: 320,
+      timeoutMs: 18000,
+      retries: 0,
+      feature: "narrative",
+    });
+    if (res.ok && res.data) {
+      narrative = res.data;
+      engine = `OpenAI ${model}`;
     }
   }
 

@@ -2,6 +2,7 @@ import { classify, detectPriority, detectSentiment, suggestTags } from "./ai";
 import { CATEGORIES, TAXONOMY, type Priority } from "./taxonomy";
 import { computeSla, type Severity, type SlaOverrides } from "./sla";
 import { getOpenAiKey, getSetting } from "./settings";
+import { chatJson, modelFor } from "./llm";
 import { enforcePriority, enforceUrgency } from "./guardrails";
 import type { AgentInsight } from "./agent";
 
@@ -247,7 +248,7 @@ export async function aiEnrich(input: {
   const base = localEnrich({ ...input, slaOverrides });
   const key = await getOpenAiKey();
   if (!key.startsWith("sk-")) return base;
-  const model = (await getSetting("openai_model")) || process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const model = await modelFor("reason");
 
   const allowed = TAXONOMY[input.category] ?? [];
   const prompt = `You are Iris, the ticket triage analyst for Physique 57 (boutique barre fitness studios in India).
@@ -280,32 +281,32 @@ Return JSON with exactly these keys:
  "tags": ["3-5 kebab-case tags"],
  "confidence": 0-100}`;
 
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "You return only valid minified JSON. No prose." },
-          { role: "user", content: prompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!res.ok) return base;
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const content = json.choices?.[0]?.message?.content;
-    if (!content) return base;
-    const parsed = JSON.parse(content) as OpenAiPayload;
+  const res = await chatJson<OpenAiPayload>({
+    system: "You are the ticket triage analyst. Return only valid minified JSON. No prose.",
+    user: prompt,
+    tier: "reason",
+    temperature: 0.2,
+    maxTokens: 800,
+    timeoutMs: 20000,
+    retries: 1,
+    feature: "triage",
+  });
+  if (!res.ok || !res.data) return base;
+  {
+    const parsed = res.data;
 
     const category = CATEGORIES.includes(parsed.category ?? "") ? parsed.category! : input.category;
     const subcategory = (TAXONOMY[category] ?? []).includes(parsed.subcategory ?? "")
       ? parsed.subcategory!
       : input.subcategory;
 
+    // The model's priority proposal is real judgement; the deterministic floor
+    // may only raise it. SLA never softens either of them.
+    const enforced = enforcePriority(
+      parsed.priority as Priority | undefined,
+      input.text,
+      parsed.priorityReason?.trim() || base.priorityReason,
+    );
     const mergedUrgency =
       typeof parsed.urgencyScore === "number"
         ? Math.max(0, Math.min(100, Math.round(parsed.urgencyScore)))
@@ -339,10 +340,12 @@ Return JSON with exactly these keys:
         ? parsed.sentiment
         : base.sentiment) as AiInsight["sentiment"],
       emotion: parsed.emotion?.trim() || base.emotion,
-      urgencyScore:
+      urgencyScore: enforceUrgency(
         typeof parsed.urgencyScore === "number"
           ? Math.max(0, Math.min(100, Math.round(parsed.urgencyScore)))
           : base.urgencyScore,
+        sla.priority,
+      ),
       churnRisk: (["Low", "Medium", "High"].includes(parsed.churnRisk ?? "")
         ? parsed.churnRisk
         : base.churnRisk) as AiInsight["churnRisk"],
@@ -351,8 +354,11 @@ Return JSON with exactly these keys:
         : base.effort) as AiInsight["effort"],
       rootCause: parsed.rootCause?.trim() || base.rootCause,
       suggestedAction: parsed.suggestedAction?.trim() || base.suggestedAction,
-      priority: sla.priority,
-      priorityReason: `${parsed.priorityReason?.trim() || base.priorityReason} · ${sla.reason}`,
+      priority: (() => {
+        const order: Priority[] = ["Low", "Medium", "High", "Critical"];
+        return order[Math.max(order.indexOf(enforced.priority), order.indexOf(sla.priority))];
+      })(),
+      priorityReason: [enforced.reason, sla.reason].filter(Boolean).join(" · "),
       tags: Array.isArray(parsed.tags) && parsed.tags.length ? parsed.tags.slice(0, 6) : base.tags,
       confidence:
         typeof parsed.confidence === "number"
@@ -362,8 +368,6 @@ Return JSON with exactly these keys:
       category,
       subcategory,
     };
-  } catch {
-    return base;
   }
 }
 

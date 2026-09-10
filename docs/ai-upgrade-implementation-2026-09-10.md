@@ -1,0 +1,46 @@
+# AI Response Quality Upgrade — Implementation Notes
+
+**Date:** 10 September 2026
+**Implements:** the recommendation roadmap in `ai-behaviour-audit-2026-09-10.md` (R0 + R1 + R3). Goal: responses that are accurate, context-aware and never static — enough owner-critical information before the first draft, Momence fields used wherever they exist, and conversations personalised to the reporter and the situation.
+
+## What changed, end to end
+
+### 1. No more silent, irrelevant or ambiguous questions
+- **Every button click now lands.** Agent-path options carry explicit bindings (`ans:<slotId>|<label>`) or bind to the pending question's slot; each tap is written to the slot in code *and* spoken into the transcript as words (`valueToWords`). A contract test enumerates every option value in the app and asserts it produces words.
+- **Owner-critical gates.** Before any draft, the engine forces one focused question each (model's own wording preferred, concrete fallback otherwise) for: **which studio** (routing), **resolved or still happening** (`resolvedNow` — new slot on the ticket draft's details), and **impact**. Each fires at most once — no loops — and outranks the question budget.
+- **Personalised greeting.** The static six-button category menu is gone; the greeting addresses the reporter by name and asks for the story in their words.
+- **Never re-ask what's known.** `ALREADY KNOWN` now includes category, resolved-state, Momence ids and `[human-set]` provenance markers; two separate asked-lists are unified in spirit via gate/dedupe logic; deterministic-path answers re-enter the transcript as utterances so the agent never loses turns.
+
+### 2. Accuracy: the model proposes, rails dispose — consistently
+- **Slot provenance** (`user | context | agent | derived`): values a human set (button, picker, context bar) can never be silently overwritten by the model. Revisions flow through an explicit **`corrections[]`** contract output — the regex `isCorrection` gate is gone.
+- **Human-locked classification:** a user-chosen category survives unless the reporter corrects it; machine classification needs ≥ 0.5 confidence to take an unset category, and resolver-corrected classifications are capped at 0.5 confidence. Missing model confidence now defaults **0.4** (was 0.6 — false certainty).
+- **One priority pipeline:** `aiEnrich` keeps the model's priority (enforced by the deterministic floor, max'ed with SLA) instead of discarding it; urgency is re-banded against the priority that ships. The floor dictionary is on a diet — only unambiguous safety and hard financial events floor the priority; judgement words ("threatened to cancel", "wants a refund") are the model's call.
+- **`raisedFor` is enum-normalised** from free-form model wording onto the four canonical values.
+
+### 3. Context-awareness: memory, embeddings, one clock
+- **`time.ts`** — one IST calendar for the whole pipeline. Session lookups and match windows no longer disagree with the agent's clock between 00:00–05:30 IST.
+- **Date-aware session matching** — a Momence row only binds when its date agrees with the report; cross-day time matches are refused.
+- **Semantic related tickets** — tickets are embedded (`text-embedding-3-small`, stored on the row, cached on write and at import); `findRelatedTickets` ranks by cosine similarity with the lexical fallback as safety net. "aircon fault" now matches "AC not cooling".
+- **Studio & member memory** — on approval, a one-line fact (`T-142: AC compressor fault — vendor replaced capacitor`) is remembered per studio/member (`context_facts`), injected into future intake as labelled, possibly-stale context.
+- **Conversation compression** — at draft time a fast-tier call summarises the narrative; long sessions keep the whole story via `EARLIER CONVERSATION SUMMARY` plus a token-capped transcript instead of a blind 24-message slice.
+
+### 4. Momence fields used wherever possible
+- **Member auto-resolution:** when a member is named, the system runs `search_member` once per session even if the model forgot; the model is instructed to copy the real contact, exact spelling and actual membership product from lookups onto the ticket (`memberContact`, `membershipRef`, `momenceMemberId`).
+- **Session auto-matching** is now IST-correct and date-aware, and marks results as `derived`.
+
+### 5. Solid plumbing
+- **One LLM client** (`llm.ts`): all seven former direct `api.openai.com` call sites (enrich, humanise, enhance, signals, trainer analysis, refinePrompt) now route through it with retries, timeouts and **per-feature telemetry**; `chatText` added for prose; fast tier used for cosmetic work; dead `refinePrompt` deleted.
+- **`ai_calls` telemetry** — every model call records feature/model/ok/error/latency/tokens/session; a **Settings → AI engine → AI telemetry** panel shows per-feature volume, failure rate, avg/p95 latency and token spend, plus draft approval stats. Draft feedback (approved / edited-first) is persisted on session state.
+- **Input hardening** — chat bodies capped (4,000 chars), composer context strictly schema'd and enum-validated (category/subcategory/priority), session ids are cryptographically random UUIDs, reporter identity derived server-side from the Supabase session, and 30 turns / 5 min per-IP rate limit on both chat endpoints.
+- **Migration `0006_ai_context_and_telemetry`** — `tickets.embedding`, `ai_calls`, `context_facts`.
+
+## Verification
+- `tsc --noEmit` clean; `next build` succeeds (with `DATABASE_URL`, as the deploy wrapper supplies; the no-env failure at `/api/auth/me` is pre-existing on `main`).
+- `npm test`: **93 passed, 11 skipped** (10 live evals + 1 session-resolution; the live suite gained a prompt-injection case).
+- New tests: IST calendar (`time.test.ts`), floor diet + `raisedFor` normalisation, option-vocabulary contract, date-aware `matchSession`, slot provenance.
+- ESLint clean on every touched file (remaining repo lint debt is in untouched components).
+
+## Deliberately unchanged
+- The deterministic engine still exists for review/edit mechanics (draft preview, edit menu, undo) — but no longer asks intake questions in agent mode.
+- Read-only Momence tool surface unchanged (prior audit H5 scoping still recommended).
+- Security items from `application-audit-2026-09-04.md` (C1–C3, H1–H3) remain tracked there.
