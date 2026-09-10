@@ -95,13 +95,25 @@ export async function runChatTurn(
   let responseModel: string | undefined;
   let responseDegradation: string | undefined;
 
+  const input = body.input ?? {};
+  // A brand-new session normally greets and waits — but when the first payload
+  // already carries the reporter's words (typed before any bootstrap round-trip,
+  // or the bootstrap was lost), it IS the opening turn. The greeting seeds the
+  // transcript; the words are processed, never swallowed.
+  const freshWithWords =
+    (!existing || body.reset === true) && Boolean(input.text?.trim() || input.value);
+
   if (!existing || body.reset) {
     const started = startSession(ctx);
     state = started.state;
-    messages = started.messages;
-    transcript = messages;
-  } else {
-    const input = body.input ?? {};
+    transcript = started.messages;
+    if (!freshWithWords) {
+      messages = started.messages;
+    }
+  }
+
+  const processTurn = !existing || Boolean(body.reset) ? freshWithWords : true;
+  if (processTurn) {
     const pushUser = (content: string) => {
       transcript.push({
         id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
