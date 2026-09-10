@@ -5,6 +5,7 @@ import { chatJson, modelFor } from "@/lib/llm";
 import { classify } from "@/lib/ai";
 import { CATEGORY_META } from "@/lib/taxonomy";
 import { ValidationError, parseBody, validationErrorResponse } from "@/lib/validation";
+import { clientKey, rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +96,13 @@ function localEnhance(text: string, context: Record<string, unknown>): { out: st
 }
 
 export async function POST(request: Request) {
+  const limit = rateLimit(`enhance:${clientKey(request)}`, 20, 5 * 60_000);
+  if (!limit.ok) {
+    return NextResponse.json(
+      { ok: false, error: "Too many rewrites — try again in a moment." },
+      { status: 429, headers: { "Retry-After": String(limit.retryAfterSeconds) } },
+    );
+  }
   let body: Body;
   try {
     body = await parseBody(request, bodySchema);

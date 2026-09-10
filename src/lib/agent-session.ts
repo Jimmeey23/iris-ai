@@ -459,6 +459,17 @@ function sessionQuery(
   return { query: query.split(" ").slice(0, 4).join(" "), date, locationId: locationId ?? undefined };
 }
 
+/**
+ * Whether the text talks about a class at all — clock times, class formats
+ * (including studio shorthand like "BBB"), or the words class/session/workout.
+ * Gates the timetable pre-fetch so billing reports never pay for one.
+ */
+export function hasClassSignal(text: string): boolean {
+  return /\b(class|session|workout|barre|mat|power\s?cycle|cycle|fit|bbb|sculpt|strength( lab)?|private)\b|\b\d{1,2}[.:]?\d{0,2}\s?(am|pm)\b/i.test(
+    text,
+  );
+}
+
 export type SessionRow = { id: number; label: string; time: string | null };
 
 /** Parse the `id=… Name · Fri, 4 Sept, 7:15 pm · Teacher` rows a lookup returns. */
@@ -705,6 +716,34 @@ export async function runAgentTurn(
 
   const toolsEnabled = await momenceAvailable().catch(() => false);
   const toolResults: ToolResult[] = [...(s.toolResults ?? [])];
+
+  // Pre-fetch the studio's timetable BEFORE the first reasoning pass. When a
+  // report names a class (or a class-shaped clock time), the model should see
+  // the real Momence sessions on its first read — resolving the session, its
+  // teacher and its booking count in one model call instead of burning a
+  // tool round-trip. Once per session; the post-turn matcher still runs on
+  // these rows deterministically.
+  if (toolsEnabled && !s.autoLookupDone && !s.data.momenceSessionId && s.data.studioId != null) {
+    const prefetch = sessionQuery(s, {}, ctx.studios);
+    if (prefetch) {
+      hooks.onStatus?.("Pulling the class schedule");
+      s.autoLookupDone = true;
+      toolResults.push(...(await runTools([{ tool: "find_sessions", args: prefetch }])));
+    } else if (hasClassSignal(utterance || narrative)) {
+      // No specific class named yet — hand over the last two days of the
+      // studio's timetable so the model can spot the session itself.
+      hooks.onStatus?.("Pulling the studio timetable");
+      s.autoLookupDone = true;
+      const locationId =
+        ctx.studios.find((st) => st.id === s.data.studioId)?.momenceLocationId ?? undefined;
+      toolResults.push(
+        ...(await runTools([
+          { tool: "find_sessions", args: { date: istDate(0), locationId } },
+          { tool: "find_sessions", args: { date: istDate(-1), locationId } },
+        ])),
+      );
+    }
+  }
 
   // Recall what the organisation already knows about this studio / member so
   // the agent never re-asks for history that is on file.

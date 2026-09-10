@@ -40,6 +40,15 @@
 - New tests: IST calendar (`time.test.ts`), floor diet + `raisedFor` normalisation, option-vocabulary contract, date-aware `matchSession`, slot provenance.
 - ESLint clean on every touched file (remaining repo lint debt is in untouched components).
 
+## Follow-up hardening pass (same day)
+
+- **Timetable pre-fetch before first reasoning.** When a studio is known and the report carries a class signal (class words, formats including "powerCycle"/"BBB" shorthand, or a clock time), the engine pulls the Momence schedule *before* the first model call — a precise query when the class is named, otherwise today's + yesterday's studio timetable. Turn 1 can now resolve the real session, teacher and booking count in a single model call instead of a tool round-trip; the deterministic `matchSession` still validates date + time before any id lands on the ticket.
+- **`hasClassSignal` gate** keeps non-class reports (billing, lockers, iPads) from ever paying for a timetable lookup.
+- **Gate-answer parsing fixed and contract-tested** via exported `applyOptionAnswer`: sentence labels ("Yes — resolved" / "No — still happening") map correctly; skip-style impact labels never invent a value; `raisedFor` taps normalise to the enum; plain answers bind only to a pending canonical question.
+- **Skipped gates get honest defaults** at draft time (impact → single; resolved → "not resolved" only when that question went unanswered) instead of blocking the draft.
+- **Injection framing**: the conversation block labels REPORTER lines as verbatim data, never instructions — paired with the `injection-hijack-resisted` eval case.
+- **`/api/ai/enhance` rate-limited** (20/5 min per IP) like the chat endpoints.
+
 ## Deliberately unchanged
 - The deterministic engine still exists for review/edit mechanics (draft preview, edit menu, undo) — but no longer asks intake questions in agent mode.
 - Read-only Momence tool surface unchanged (prior audit H5 scoping still recommended).

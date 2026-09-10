@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { matchSession, parseSessionRows, reportedTimes, resolveStudio } from "./agent-session";
 import { emptyState, markSlotSource, slotSource, valueToWords } from "./chat-engine";
-import { applyOptionAnswer } from "./agent-session";
+import { applyOptionAnswer, hasClassSignal } from "./agent-session";
 
 const STUDIOS = [
   { id: 1, name: "Kwality House, Kemps Corner", code: "KC", city: "Mumbai", isHq: false },
@@ -213,5 +213,21 @@ describe("option answers bind to slots", () => {
     const r = applyOptionAnswer("ans:They accepted a credit", s, "custom:offer_made");
     expect(r.slot).toBeUndefined();
     expect(s.data.extraDetails).toBeUndefined();
+  });
+});
+
+describe("hasClassSignal — gates the timetable pre-fetch", () => {
+  it("fires on class words, formats, studio shorthand and clock times", () => {
+    expect(hasClassSignal("the AC died during the 7am class")).toBe(true);
+    expect(hasClassSignal("BBB and cycle were affected at 10.30am")).toBe(true);
+    expect(hasClassSignal("powerCycle Express had no music")).toBe(true);
+    expect(hasClassSignal("someone left their Mat 57 early")).toBe(true);
+    expect(hasClassSignal("the 7:15pm session ran over")).toBe(true);
+  });
+
+  it("stays quiet for non-class reports so they never pay for a lookup", () => {
+    expect(hasClassSignal("member was double charged for her pack")).toBe(false);
+    expect(hasClassSignal("reception ipad will not turn on")).toBe(false);
+    expect(hasClassSignal("locker room smells")).toBe(false);
   });
 });
