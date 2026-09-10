@@ -59,7 +59,13 @@ export async function apiPostStream(
     signal,
   });
   if (!res.ok || !res.body) {
-    const message = await res.text().catch(() => "");
+    const raw = await res.text().catch(() => "");
+    let message = raw;
+    try {
+      message = (JSON.parse(raw) as { error?: string }).error ?? raw;
+    } catch {
+      // Not JSON — keep the raw text.
+    }
     throw new ApiError(message || `Request failed (${res.status})`, res.status);
   }
 

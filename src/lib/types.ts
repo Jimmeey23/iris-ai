@@ -19,6 +19,8 @@ export type MomenceContext = {
 export type TicketDraft = {
   category: string;
   subcategory: string;
+  /** Routing hint from the historic-issue patterns (who usually owns these). */
+  ownerHint?: string;
   title: string;
   summary: string;
   description: string;

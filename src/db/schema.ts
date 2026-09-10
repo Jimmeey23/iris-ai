@@ -7,6 +7,7 @@ import {
   jsonb,
   boolean,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const studios = pgTable("studios", {
@@ -98,6 +99,8 @@ export const tickets = pgTable("tickets", {
   linkedTicketIds: jsonb("linked_ticket_ids").$type<number[]>().notNull().default([]),
   resolutionNotes: text("resolution_notes"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  /** Vector embedding of title+summary+rootCause, for semantic related-ticket search. */
+  embedding: jsonb("embedding").$type<number[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
@@ -106,6 +109,38 @@ export const tickets = pgTable("tickets", {
   index("tickets_studio_id_idx").on(t.studioId),
   index("tickets_category_idx").on(t.category),
   index("tickets_parent_ticket_id_idx").on(t.parentTicketId),
+]);
+
+/**
+ * Inbound emails awaiting or receiving triage. Every email that arrives (via
+ * the provider webhook or pasted in the Inbox) is stored raw first, then
+ * triaged into a ticket — so nothing is lost even when triage fails, and the
+ * same message can never raise two tickets (unique message id).
+ */
+export const inboundEmails = pgTable("inbound_emails", {
+  id: serial("id").primaryKey(),
+  /** Provider message id, or a stable hash for pasted emails. */
+  messageId: text("message_id").notNull(),
+  /** Normalised subject + sender — groups replies into one thread. */
+  threadKey: text("thread_key").notNull(),
+  fromName: text("from_name"),
+  fromEmail: text("from_email").notNull(),
+  toEmail: text("to_email"),
+  subject: text("subject").notNull().default("(no subject)"),
+  bodyText: text("body_text").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  /** received → ticketed | duplicate | rejected. */
+  status: text("status").notNull().default("received"),
+  ticketId: integer("ticket_id"),
+  /** How triage went, or why it was rejected. */
+  triageNote: text("triage_note"),
+  /** The original webhook payload, kept for audit and replay. */
+  raw: jsonb("raw").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("inbound_emails_message_id_key").on(t.messageId),
+  index("inbound_emails_thread_idx").on(t.threadKey),
+  index("inbound_emails_ticket_id_idx").on(t.ticketId),
 ]);
 
 export const ticketEvents = pgTable("ticket_events", {
@@ -281,3 +316,40 @@ export type CustomFilloutForm = typeof customFilloutForms.$inferSelect;
 export type TrainerAnalysis = typeof trainerAnalysis.$inferSelect;
 export type WhatsappTemplate = typeof whatsappTemplates.$inferSelect;
 export type UserAccount = typeof userAccounts.$inferSelect;
+
+/**
+ * One row per AI model call: feature, model, outcome, latency and tokens.
+ * Written best-effort by the shared LLM wrapper so quality, cost and
+ * degradation are observable per feature over time.
+ */
+export const aiCalls = pgTable("ai_calls", {
+  id: serial("id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  feature: text("feature").notNull().default("unknown"),
+  model: text("model"),
+  ok: boolean("ok").notNull(),
+  error: text("error"),
+  latencyMs: integer("latency_ms"),
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  sessionId: text("session_id"),
+}, (t) => [
+  index("ai_calls_created_at_idx").on(t.createdAt),
+  index("ai_calls_feature_idx").on(t.feature),
+]);
+
+/**
+ * Lightweight studio/member memory: one-line facts remembered from past
+ * tickets ("T-142: AC compressor fault — vendor replaced capacitor") injected
+ * into future intake conversations so the assistant knows the studio's history.
+ */
+export const contextFacts = pgTable("context_facts", {
+  id: serial("id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  scope: text("scope").notNull().default("studio"),
+  refKey: text("ref_key").notNull(),
+  fact: text("fact").notNull(),
+  sourceTicketNumber: text("source_ticket_number"),
+}, (t) => [
+  index("context_facts_scope_ref_idx").on(t.scope, t.refKey),
+]);

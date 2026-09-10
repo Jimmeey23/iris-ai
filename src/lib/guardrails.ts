@@ -4,13 +4,18 @@ import { CATEGORIES, PRIORITIES, TAXONOMY, type Priority } from "./taxonomy";
 /**
  * Deterministic rails around the LLM. The model decides wording, questions and
  * judgement; these rules decide what is *allowed* to reach a ticket.
+ *
+ * Floor policy (deliberately narrow): only unambiguous, factual safety events
+ * and hard financial events set a floor. Judgement words ("threatened to
+ * cancel", "wants a refund", "legal") are left to the model — a floor that
+ * fires on polite English erodes trust in every priority it sets.
  */
 
 /** Words that set a priority floor the model can raise but never lower. */
 const CRITICAL_SIGNALS =
-  /\b(injur|injured|hurt her|hurt his|hurt their|got hurt|bleeding|fainted|unconscious|collaps|ambulance|hospital|fire|smoke|electrocut|electric shock|harass|assault|molest|abuse|threat(en)?|police|evacuat|blocked exit|gas leak|short circuit)\w*/i;
+  /\b(injur|injured|hurt her|hurt his|hurt their|got hurt|bleeding|fainted|unconscious|collaps|ambulance|hospital|fire|smoke|electrocut|electric shock|harass|assault|molest|abuse|police|evacuat|blocked exit|gas leak|short circuit|weapon|knife)\w*/i;
 const HIGH_SIGNALS =
-  /\b(unsafe|danger|hazard|slipped|fell|trip(ped)?|flood|leak|no power|power (cut|outage|failure)|outage|stuck in|locked in|theft|stolen|missing wallet|chargeback|refund demand|wants a refund|demanding a refund|charged twice|double charg|duplicate charg|billed twice|overcharg|legal|lawyer|media|social post)\w*/i;
+  /\b(unsafe|danger|hazard|slipped|fell|trip(ped)?|flood|leak|no power|power (cut|outage|failure)|outage|stuck in|locked in|theft|stolen|missing wallet|chargeback|charged twice|double charg|duplicate charg|billed twice|overcharg)\w*/i;
 
 export type PriorityFloor = { floor: Priority; reason?: string };
 
@@ -103,11 +108,52 @@ export async function questionBudget(): Promise<number> {
 }
 
 /** Slots that must be present before a ticket can be raised. */
-export function missingRequired(data: { studioName?: string; rawText?: string }): string[] {
+export function missingRequired(data: {
+  studioName?: string;
+  rawText?: string;
+  impact?: string;
+  resolvedNow?: boolean;
+}): string[] {
   const missing: string[] = [];
   if (!data.rawText || data.rawText.trim().length < 3) missing.push("rawText");
   if (data.studioName === undefined) missing.push("studio");
+  if (data.impact === undefined) missing.push("impact");
+  if (data.resolvedNow === undefined) missing.push("resolvedNow");
   return missing;
+}
+
+export const RAISED_FOR_VALUES = [
+  "On behalf of a member",
+  "Multiple members",
+  "Noticed by staff",
+  "Staff or trainer concern",
+] as const;
+
+/**
+ * Force the model's free-form "raised for" wording onto the four values the
+ * ticket UI and reports expect. Near-misses are mapped; anything unmappable
+ * lands on "Noticed by staff" rather than an invented category.
+ */
+export function normaliseRaisedFor(value: string | undefined): string {
+  const v = (value ?? "").trim();
+  if (!v) return "Noticed by staff";
+  if (RAISED_FOR_VALUES.some((r) => r.toLowerCase() === v.toLowerCase())) {
+    return RAISED_FOR_VALUES.find((r) => r.toLowerCase() === v.toLowerCase())!;
+  }
+  const p = v.toLowerCase();
+  if (/\b(multiple|several|many|a few|lots of)\b.*\b(members?|clients?|guests?|people)\b|^\bmultiple\b/.test(p)) {
+    return "Multiple members";
+  }
+  if (/\bon behalf of\b/.test(p)) return "On behalf of a member";
+  if (/\b(member|client|guest|customer)\b/.test(p) && /\b(complain|report|said|asked|upset|wants|raised|for a)\b/.test(p)) {
+    return "On behalf of a member";
+  }
+  if (/\bstaff or trainer\b|\btrainer concern\b|\bteam concern\b/.test(p)) return "Staff or trainer concern";
+  if (/\b(i|we|staff|front desk|manager|myself)\b.*\b(noticed|saw|found|observed|spotted|logged)\b|^\bi noticed\b|staff concern/.test(p)) {
+    return "Noticed by staff";
+  }
+  if (/\b(member|client|guest|customer)\b/.test(p)) return "On behalf of a member";
+  return "Noticed by staff";
 }
 
 /** Trim any model prose that runs long or slips into bullet-point mode. */

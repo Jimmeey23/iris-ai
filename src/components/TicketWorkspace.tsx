@@ -26,6 +26,78 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
   );
 }
 
+/**
+ * Approve-and-send panel for email-sourced tickets: Iris drafts the reply,
+ * a human edits/sends it. Nothing goes out until someone presses Send.
+ */
+function EmailReplyPanel({ ticket, actor }: { ticket: Ticket; actor: string }) {
+  const draft = ticket.details?.["Draft reply"] ?? "";
+  const sent = Boolean(ticket.details?.["Reply sent at"]);
+  const [text, setText] = useState(draft);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const router = useRouter();
+
+  if (!draft || sent) {
+    return sent ? (
+      <div className="panel rounded-2xl">
+        <header className="border-b px-5 py-3.5 hairline">
+          <h2 className="serif text-[17px] leading-none txt">Email reply</h2>
+          <p className="mt-0.5 text-[11.5px] txt-3">
+            Sent to {ticket.details?.["From"]} · {ticket.details?.["Reply sent at"]?.slice(0, 16).replace("T", " ")}
+          </p>
+        </header>
+      </div>
+    ) : null;
+  }
+
+  const send = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await apiFetch<{ detail?: string }>(`/api/tickets/${ticket.id}/reply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, actor }),
+      });
+      setMsg(res.detail ?? "Reply sent.");
+      router.refresh();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Could not send — check the mail integration in Settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel rounded-2xl">
+      <header className="flex items-center justify-between border-b px-5 py-3.5 hairline">
+        <div>
+          <h2 className="serif text-[17px] leading-none txt">Email reply — Iris drafted, you approve</h2>
+          <p className="mt-0.5 text-[11.5px] txt-3">
+            Engine: {ticket.details?.["Reply engine"] ?? "template"} · sends to {ticket.details?.["From"]}
+          </p>
+        </div>
+        <span className="chip" style={{ background: "var(--surface-3)" }}>Awaiting approval</span>
+      </header>
+      <div className="space-y-3 p-5">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={8}
+          className="input w-full resize-y text-[13px] leading-relaxed"
+        />
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={send} disabled={busy || text.trim().length < 3} className="btn btn-primary !text-[12px]">
+            {busy ? "Sending…" : "Approve & send"}
+          </button>
+          {msg && <span className="text-[12px] txt-3">{msg}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export type LinkedTicket = {
   id: number;
   ticketNumber: string;
@@ -224,6 +296,10 @@ export default function TicketWorkspace({
             ))}
           </dl>
         </div>
+
+        {(ticket.source === "email" || ticket.source === "email-forwarded") && (
+          <EmailReplyPanel ticket={ticket} actor={user.name} />
+        )}
 
         {linked.length > 0 && (
           <div className="panel rounded-2xl">

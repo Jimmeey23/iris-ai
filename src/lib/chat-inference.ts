@@ -1,7 +1,7 @@
 import { extractPerson, extractStudio } from "./ai";
-import type { Priority } from "./taxonomy";
+import { CATEGORIES, PRIORITIES, TAXONOMY, type Priority } from "./taxonomy";
 import type { ComposerContext } from "./types";
-import type { EngineContext, IntakeState } from "./chat-engine";
+import { markSlotSource, type EngineContext, type IntakeState } from "./chat-engine";
 
 export const CLASS_FORMATS = [
   "Barre 57", "Cardio Barre", "Studio FIT", "Mat 57", "Power Cycle", "Private Session", "Not class specific",
@@ -222,21 +222,25 @@ export function applyComposerContext(context: ComposerContext, s: IntakeState): 
   if (context.studioName) {
     d.studioId = context.studioId ?? null;
     d.studioName = context.studioName;
+    markSlotSource(s, "studio", "context");
     found.push(`Studio · ${context.studioName}`);
   }
   if (context.memberName) {
     d.memberName = context.memberName;
     d.raisedFor = d.raisedFor ?? "On behalf of a member";
+    markSlotSource(s, ["member", "raisedFor"], "context");
     found.push(`Member · ${context.memberName}`);
   }
   if (context.memberContact) d.memberContact = context.memberContact;
   if (context.memberId) d.momenceMemberId = context.memberId;
   if (context.trainerName) {
     d.trainerName = context.trainerName;
+    markSlotSource(s, "trainerName", "context");
     found.push(`Trainer · ${context.trainerName}`);
   }
   if (context.classInfo) {
     d.classInfo = context.classInfo;
+    markSlotSource(s, "classInfo", "context");
     found.push(`Class · ${context.classInfo}`);
   }
   if (context.classAt) {
@@ -244,16 +248,22 @@ export function applyComposerContext(context: ComposerContext, s: IntakeState): 
     d.occurredAt = d.occurredAt ?? describeWhen(context.classAt);
     found.push(`Class time · ${context.classAt}`);
   }
-  if (context.sessionId) d.momenceSessionId = context.sessionId;
+  if (context.sessionId) {
+    d.momenceSessionId = context.sessionId;
+    markSlotSource(s, "momenceSessionId", "context");
+  }
   if (context.membershipRef) {
     d.membershipRef = context.membershipRef;
+    markSlotSource(s, "membershipRef", "context");
     found.push(`Membership · ${context.membershipRef}`);
   }
-  if (context.category) {
+  // Composer values are client-supplied: only real taxonomy entries may pass,
+  // otherwise a tampered payload could steer classification or priority.
+  if (context.category && CATEGORIES.includes(context.category)) {
     d.category = context.category;
     found.push(`Category · ${context.category}`);
   }
-  if (context.subcategory) {
+  if (context.subcategory && context.category && (TAXONOMY[context.category] ?? []).includes(context.subcategory)) {
     d.subcategory = context.subcategory;
     found.push(`Subcategory · ${context.subcategory}`);
   }
@@ -270,8 +280,9 @@ export function applyComposerContext(context: ComposerContext, s: IntakeState): 
     d.impact = map[context.impact] ?? context.impact;
     found.push(`Impact · ${context.impact}`);
   }
-  if (context.priority) {
+  if (context.priority && PRIORITIES.includes(context.priority as Priority)) {
     d.priorityOverride = context.priority as Priority;
+    markSlotSource(s, "priorityOverride", "context");
     found.push(`Priority · ${context.priority}`);
   }
   if (context.source) {

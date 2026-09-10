@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Panel } from "./ui";
 import { CATEGORY_DEPARTMENT } from "@/lib/org";
 import { basePolicy } from "@/lib/sla";
@@ -17,6 +17,57 @@ const MODELS = [
   { id: "gpt-4.1-mini", label: "GPT-4.1 mini — cheaper, weaker judgement" },
   { id: "gpt-4o-mini", label: "GPT-4o mini — cheapest" },
 ];
+
+type AiStats = {
+  keyConfigured: boolean;
+  windowDays: number;
+  features: { feature: string; calls: number; failures: number; avgLatencyMs: number; p95LatencyMs: number; inputTokens: number; outputTokens: number }[];
+  drafts: { recentSessions: number; approved: number; approvedAfterEdits: number };
+};
+
+function AiTelemetry() {
+  const [stats, setStats] = useState<AiStats | null>(null);
+  useEffect(() => {
+    apiFetch<AiStats>("/api/ai/stats").then(setStats).catch(() => setStats(null));
+  }, []);
+  if (!stats || stats.features.length === 0) return null;
+  return (
+    <Panel title="AI telemetry" subtitle="Model calls over the last 7 days">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-[11.5px]">
+          <thead className="txt-3">
+            <tr>
+              <th className="py-1 pr-3 font-medium">Feature</th>
+              <th className="py-1 pr-3 font-medium">Calls</th>
+              <th className="py-1 pr-3 font-medium">Failed</th>
+              <th className="py-1 pr-3 font-medium">Avg</th>
+              <th className="py-1 pr-3 font-medium">p95</th>
+              <th className="py-1 font-medium">Tokens in/out</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.features.map((f) => (
+              <tr key={f.feature} className="border-t" style={{ borderColor: "var(--line)" }}>
+                <td className="py-1.5 pr-3 font-medium txt">{f.feature}</td>
+                <td className="py-1.5 pr-3 txt-2">{f.calls}</td>
+                <td className="py-1.5 pr-3" style={{ color: f.failures > 0 ? "var(--warn)" : undefined }}>{f.failures}</td>
+                <td className="py-1.5 pr-3 txt-2">{f.avgLatencyMs} ms</td>
+                <td className="py-1.5 pr-3 txt-2">{f.p95LatencyMs} ms</td>
+                <td className="py-1.5 txt-3">{f.inputTokens} / {f.outputTokens}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {stats.drafts.recentSessions > 0 && (
+        <p className="mt-2 text-[10.5px] leading-relaxed txt-3">
+          Recent drafts: {stats.drafts.approved}/{stats.drafts.recentSessions} approved
+          {stats.drafts.approvedAfterEdits > 0 ? ` · ${stats.drafts.approvedAfterEdits} needed edits first` : ""}.
+        </p>
+      )}
+    </Panel>
+  );
+}
 
 const TABS = [
   "AI engine", "Momence", "Fillout", "Supabase", "Mailtrap", "n8n", "respond.io", "SLA policy", "Workspace",
@@ -247,6 +298,8 @@ export default function SettingsPanel({
                 </div>
               </div>
             </Panel>
+
+            <AiTelemetry />
 
             <Panel title="AI behaviour" subtitle="What Iris may do">
               <div className="space-y-0.5">

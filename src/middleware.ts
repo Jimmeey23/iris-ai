@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createSupabaseMiddlewareClient } from "@/lib/supabase/middleware";
+import { devAuthBypassActive } from "@/lib/dev-auth";
 
 const PUBLIC_PATHS = ["/login", "/auth/callback", "/api/auth", "/api/health", "/api/fillout", "/api/cron"];
 
@@ -10,6 +11,10 @@ function isPublic(pathname: string): boolean {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (isPublic(pathname)) return NextResponse.next();
+
+  // Local/sandbox runs with no Supabase project configured: skip auth entirely
+  // (getSessionUser supplies the fixed dev identity). Never active in production.
+  if (devAuthBypassActive()) return NextResponse.next();
 
   const { supabase, response } = createSupabaseMiddlewareClient(request);
   const {

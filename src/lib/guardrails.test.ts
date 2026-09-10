@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enforcePriority, enforceUrgency, priorityFloor, resolveClassification } from "./guardrails";
+import { enforcePriority, enforceUrgency, normaliseRaisedFor, priorityFloor, resolveClassification } from "./guardrails";
 import { TAXONOMY } from "./taxonomy";
 
 describe("priority floor", () => {
@@ -67,7 +67,33 @@ describe("money signals", () => {
     expect(priorityFloor("she was charged twice for her class pack").floor).toBe("High");
   });
 
-  it("treats a refund demand as at least High", () => {
-    expect(priorityFloor("the member wants a refund today").floor).toBe("High");
+  it("treats a chargeback as at least High", () => {
+    expect(priorityFloor("the member filed a chargeback with her bank").floor).toBe("High");
+  });
+});
+
+describe("floor diet — judgement words belong to the model", () => {
+  it("does not escalate a member threatening to cancel", () => {
+    expect(priorityFloor("the member threatened to cancel her membership").floor).toBe("Low");
+  });
+
+  it("does not escalate polite refund requests", () => {
+    expect(priorityFloor("the member asked for a refund for the missed class").floor).toBe("Low");
+  });
+});
+
+describe("raised-for normalisation", () => {
+  it("maps near-miss model wording onto the four canonical values", () => {
+    expect(normaliseRaisedFor("on behalf of a member")).toBe("On behalf of a member");
+    expect(normaliseRaisedFor("Several members complained")).toBe("Multiple members");
+    expect(normaliseRaisedFor("I noticed it during close")).toBe("Noticed by staff");
+    expect(normaliseRaisedFor("staff or trainer concern")).toBe("Staff or trainer concern");
+    expect(normaliseRaisedFor("a member reported this")).toBe("On behalf of a member");
+  });
+
+  it("defaults empty or unusable values", () => {
+    expect(normaliseRaisedFor(undefined)).toBe("Noticed by staff");
+    expect(normaliseRaisedFor("")).toBe("Noticed by staff");
+    expect(normaliseRaisedFor("the moon")).toBe("Noticed by staff");
   });
 });

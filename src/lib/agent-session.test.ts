@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { matchSession, parseSessionRows, reportedTimes, resolveStudio } from "./agent-session";
+import { emptyState, markSlotSource, slotSource, valueToWords } from "./chat-engine";
+import { applyOptionAnswer, hasClassSignal } from "./agent-session";
 
 const STUDIOS = [
   { id: 1, name: "Kwality House, Kemps Corner", code: "KC", city: "Mumbai", isHq: false },
@@ -100,5 +102,132 @@ describe("matchSession", () => {
 
   it("handles an empty result", () => {
     expect(matchSession([], "the 7:15pm powerCycle")).toBeNull();
+  });
+
+  it("only binds rows from the reported day when the day is known", () => {
+    const rows = parseSessionRows(TIMETABLE); // all dated Fri, 4 Sept
+    // The same clock time a week earlier must not bind to these rows.
+    expect(matchSession(rows, "the 7:15pm powerCycle was late", "2026-08-28")).toBeNull();
+    // The right day keeps the time-based match.
+    expect(matchSession(rows, "the 7:15pm powerCycle was late", "2026-09-04")?.id).toBe(141066997);
+  });
+});
+
+describe("option vocabulary — every click speaks words the agent can read", () => {
+  const ctx = { studios: STUDIOS };
+
+  // Every option value the UI can render, from every engine surface.
+  const ANSWER_VALUES = [
+    "ans:Yes — needs immediate action",
+    "ans:impact|Several members affected",
+    "ans:resolved|Yes — resolved",
+    "studio:1", "studio:none",
+    "member:123|Priya Shah",
+    "session:141066997|Barre 57 · Fri, 4 Sept, 10:00 am|Neha Rao",
+    "trainer:Neha", "membership:20-class pack", "mem:Annual membership",
+    "for:On behalf of a member",
+    "class:Barre 57", "loc:Locker room", "sys:POS / card machine",
+    "when:Just now", "impact:safety", "risk:yes", "risk:no",
+    "freq:First time", "cat:Class Experience", "sub:Audio Issues",
+    "skip", "browse", "unknown", "showall",
+    "confirm:yes", "confirm:alt:0", "prio:High", "edit", "edit:studio",
+  ];
+
+  it("translates every answer value into non-empty words", () => {
+    for (const value of ANSWER_VALUES) {
+      const words = valueToWords(value, ctx);
+      expect(words, `value ${value} produced no words`).not.toBe("");
+    }
+  });
+
+  it("produces plain-language words, never raw ids", () => {
+    for (const value of ANSWER_VALUES) {
+      expect(valueToWords(value, ctx)).not.toMatch(/^[a-z]+:/);
+    }
+  });
+
+  it("maps the tapped studio to the real studio name", () => {
+    expect(valueToWords("studio:1", ctx)).toContain("Kwality House");
+    expect(valueToWords("studio:none", ctx)).toContain("not studio specific");
+  });
+
+  it("leaves deterministic commands wordless — they never reach the agent", () => {
+    for (const value of ["approve", "restart", "new", "undo", ""]) {
+      expect(valueToWords(value, ctx)).toBe("");
+    }
+  });
+});
+
+describe("slot provenance", () => {
+  it("records and reads back sources", () => {
+    const s = emptyState();
+    expect(slotSource(s, "studio")).toBeUndefined();
+    markSlotSource(s, "studio", "user");
+    expect(slotSource(s, "studio")).toBe("user");
+    markSlotSource(s, ["classInfo", "trainerName"], "context");
+    expect(slotSource(s, "classInfo")).toBe("context");
+    expect(slotSource(s, "trainerName")).toBe("context");
+  });
+});
+
+describe("option answers bind to slots", () => {
+  it("parses sentence-style gate labels to their values", () => {
+    const s = emptyState();
+    const r = applyOptionAnswer("ans:resolved|Yes — resolved", s, "resolvedNow");
+    expect(r.slot).toBe("resolvedNow");
+    expect(s.data.resolvedNow).toBe(true);
+    expect(slotSource(s, "resolvedNow")).toBe("user");
+
+    const s2 = emptyState();
+    applyOptionAnswer("ans:resolved|No — still happening", s2, "resolvedNow");
+    expect(s2.data.resolvedNow).toBe(false);
+  });
+
+  it("maps impact labels onto the stable keys, and refuses to invent one", () => {
+    const s = emptyState();
+    applyOptionAnswer("ans:impact|Several members affected", s, "impact");
+    expect(s.data.impact).toBe("many");
+
+    const s2 = emptyState();
+    applyOptionAnswer("ans:impact|Not applicable", s2, "impact");
+    expect(s2.data.impact).toBeUndefined();
+  });
+
+  it("normalises raised-for labels onto the canonical enum", () => {
+    const s = emptyState();
+    applyOptionAnswer("ans:raisedFor|A member reported it", s, "raisedFor");
+    expect(s.data.raisedFor).toBe("On behalf of a member");
+  });
+
+  it("binds plain answers to the pending canonical question", () => {
+    const s = emptyState();
+    s.pendingQuestionId = "frequency";
+    const r = applyOptionAnswer("ans:First time", s, "frequency");
+    expect(r.slot).toBe("frequency");
+    expect(s.data.frequency).toBe("First time");
+  });
+
+  it("never binds plain answers when no canonical question is pending", () => {
+    const s = emptyState();
+    s.pendingQuestionId = "custom:offer_made";
+    const r = applyOptionAnswer("ans:They accepted a credit", s, "custom:offer_made");
+    expect(r.slot).toBeUndefined();
+    expect(s.data.extraDetails).toBeUndefined();
+  });
+});
+
+describe("hasClassSignal — gates the timetable pre-fetch", () => {
+  it("fires on class words, formats, studio shorthand and clock times", () => {
+    expect(hasClassSignal("the AC died during the 7am class")).toBe(true);
+    expect(hasClassSignal("BBB and cycle were affected at 10.30am")).toBe(true);
+    expect(hasClassSignal("powerCycle Express had no music")).toBe(true);
+    expect(hasClassSignal("someone left their Mat 57 early")).toBe(true);
+    expect(hasClassSignal("the 7:15pm session ran over")).toBe(true);
+  });
+
+  it("stays quiet for non-class reports so they never pay for a lookup", () => {
+    expect(hasClassSignal("member was double charged for her pack")).toBe(false);
+    expect(hasClassSignal("reception ipad will not turn on")).toBe(false);
+    expect(hasClassSignal("locker room smells")).toBe(false);
   });
 });

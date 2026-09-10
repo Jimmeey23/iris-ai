@@ -13,6 +13,7 @@ const RAIL = [
   { href: "/assistant", label: "Iris", icon: "✦", title: "AI Assistant" },
   { href: "/templates", label: "Intake", icon: "▤", title: "Templates" },
   { href: "/tickets", label: "Queue", icon: "≡", title: "Tickets" },
+  { href: "/inbox", label: "Inbox", icon: "✉", title: "Email inbox — emails become tickets" },
   { href: "/trainers", label: "Team", icon: "◑", title: "Trainers" },
   { href: "/forms", label: "Forms", icon: "✎", title: "Evaluation forms" },
   { href: "/reviews", label: "Reviews", icon: "▥", title: "Trainer reviews & submissions" },
@@ -22,6 +23,7 @@ const RAIL = [
 ];
 
 const PAGE_TITLES: Record<string, { title: string; eyebrow: string }> = {
+  "/inbox": { title: "Email inbox", eyebrow: "Emails in, routed tickets out" },
   "/": { title: "Command Centre", eyebrow: "Live studio pulse" },
   "/assistant": { title: "Iris Assistant", eyebrow: "Conversational intake" },
   "/templates": { title: "Quick Forms", eyebrow: "Structured capture" },

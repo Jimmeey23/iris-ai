@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { userAccounts, staff } from "@/db/schema";
 import { createSupabaseServerClient } from "./supabase/server";
+import { DEV_USER, devAuthBypassActive } from "./dev-auth";
 
 export type Role = "admin" | "manager" | "executive";
 
@@ -43,6 +44,9 @@ export type SessionUser = {
 
 /** Current signed-in user, auto-provisioning a user_accounts row on first login. */
 export async function getSessionUser(): Promise<SessionUser | null> {
+  // Dev/sandbox runs with no Supabase project: a fixed local identity instead
+  // of a hard failure. Never active in production — see dev-auth.ts.
+  if (devAuthBypassActive()) return { ...DEV_USER };
   const supabase = await createSupabaseServerClient();
   const {
     data: { user },

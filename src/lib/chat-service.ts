@@ -14,6 +14,9 @@ import {
   type IntakeState,
 } from "@/lib/chat-engine";
 import { humanise } from "@/lib/conversation";
+import { valueToWords } from "@/lib/chat-engine";
+import { rememberFact } from "@/lib/memory";
+import { embed } from "@/lib/embeddings";
 import type { ChatMessage, ComposerContext } from "@/lib/types";
 import type { SlotId } from "@/lib/dynamic-chat";
 
@@ -92,13 +95,25 @@ export async function runChatTurn(
   let responseModel: string | undefined;
   let responseDegradation: string | undefined;
 
+  const input = body.input ?? {};
+  // A brand-new session normally greets and waits — but when the first payload
+  // already carries the reporter's words (typed before any bootstrap round-trip,
+  // or the bootstrap was lost), it IS the opening turn. The greeting seeds the
+  // transcript; the words are processed, never swallowed.
+  const freshWithWords =
+    (!existing || body.reset === true) && Boolean(input.text?.trim() || input.value);
+
   if (!existing || body.reset) {
     const started = startSession(ctx);
     state = started.state;
-    messages = started.messages;
-    transcript = messages;
-  } else {
-    const input = body.input ?? {};
+    transcript = started.messages;
+    if (!freshWithWords) {
+      messages = started.messages;
+    }
+  }
+
+  const processTurn = !existing || Boolean(body.reset) ? freshWithWords : true;
+  if (processTurn) {
     const pushUser = (content: string) => {
       transcript.push({
         id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -111,7 +126,8 @@ export async function runChatTurn(
     // The LLM agent drives intake whenever a key is configured; the on-device
     // engine stays as the offline fallback and is used automatically if the
     // model call fails.
-    const result = await runAgentTurn(state, transcript, input, ctx, hooks);
+    const agentInput = { ...(input ?? {}), sessionId: body.sessionId ?? sessionId };
+    const result = await runAgentTurn(state, transcript, agentInput, ctx, hooks);
     const agentResult = result as Partial<AgentTurnResult>;
     const usedAgent = agentResult.usedAgent === true;
     responseMode = agentResult.degraded ? "unavailable" : usedAgent ? "agent" : "deterministic";
@@ -119,11 +135,19 @@ export async function runChatTurn(
     responseDegradation = agentResult.degraded;
 
     // Record the reporter's turn in their own words. In agent mode that includes
-    // option and picker clicks, which the agent must be able to re-read.
-    const spoken = (usedAgent ? agentResult.userUtterance : undefined) ?? input.text?.trim();
+    // option and picker clicks, which the agent must be able to re-read. In
+    // deterministic mode (review/edit mechanics) the button values are spoken
+    // too, so the transcript the agent later reads is never missing turns.
+    const spoken =
+      (usedAgent ? agentResult.userUtterance : undefined) ??
+      ((input.value ? valueToWords(input.value, ctx) : "") || input.text?.trim());
     if (spoken) pushUser(spoken);
 
-    state = result.state;
+    if (!usedAgent && input.value === "edit") {
+      state = { ...result.state, editCount: (result.state.editCount ?? 0) + 1 };
+    } else {
+      state = result.state;
+    }
     messages = result.messages;
 
     // Re-enrich only when there is nothing to reuse. The reporter reviews a
@@ -201,7 +225,43 @@ export async function runChatTurn(
         }));
       const draft = buildDraft(state, ctx, insight);
       const { primary: ticket, children } = await createTicketBundle(draft);
-      state = { ...state, step: "created", createdTicketId: ticket.id };
+      state = {
+        ...state,
+        step: "created",
+        createdTicketId: ticket.id,
+        outcome: "approved",
+        approvedAt: new Date().toISOString(),
+      };
+
+      // Remember what this studio (and member) just taught us, so future intake
+      // starts from history instead of a blank slate. Best-effort, never blocking.
+      try {
+        if (d.studioId != null) {
+          await rememberFact(
+            "studio",
+            String(d.studioId),
+            `${ticket.ticketNumber}: ${draft.title}${draft.rootCause ? ` — ${draft.rootCause}` : ""}`.slice(0, 380),
+            ticket.ticketNumber,
+          );
+        }
+        if (d.memberName && !/anonymous|not specified/i.test(d.memberName)) {
+          await rememberFact(
+            "member",
+            d.memberName,
+            `${ticket.ticketNumber}: ${draft.title}`.slice(0, 380),
+            ticket.ticketNumber,
+          );
+        }
+        // Embed the fresh ticket so it is semantically searchable immediately.
+        const vec = await embed([`${draft.title} ${draft.summary} ${draft.rootCause ?? ""} ${draft.subcategory}`]);
+        if (vec?.[0]) {
+          const { tickets } = await import("@/db/schema");
+          const { eq } = await import("drizzle-orm");
+          await (await import("@/db")).db.update(tickets).set({ embedding: vec[0] }).where(eq(tickets.id, ticket.id));
+        }
+      } catch {
+        // Memory is an optimisation — the ticket itself is already safe.
+      }
       messages = [
         ...messages,
         createdMessage(

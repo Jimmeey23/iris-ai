@@ -1,6 +1,5 @@
-import { CATEGORY_META, TAXONOMY } from "./taxonomy";
+import { CATEGORY_META } from "./taxonomy";
 import { CLASS_FORMATS, MEMBERSHIPS, OCCURRED_OPTIONS, STUDIO_AREAS, SYSTEMS } from "./catalog";
-import { getOpenAiKey, getSetting } from "./settings";
 import { profileFor } from "./question-bank";
 import type { ChatOption } from "./types";
 
@@ -341,55 +340,4 @@ export function buildQuestion(
   return applyProfileOverride(base, ctx.category ?? "", ctx.subcategory);
 }
 
-/* ------------------------------------------------------------------ */
-/* Optional LLM refinement of the question wording                     */
-/* ------------------------------------------------------------------ */
-
-export async function refinePrompt(
-  question: DynamicQuestion,
-  ctx: { text: string; category: string; subcategory: string; asked: string[] },
-): Promise<DynamicQuestion> {
-  const key = await getOpenAiKey();
-  if (!key.startsWith("sk-")) return question;
-  const model = (await getSetting("openai_model")) || "gpt-4o-mini";
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        temperature: 0.4,
-        max_tokens: 90,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You rewrite one intake question for a boutique fitness studio ticketing assistant. Return JSON {\"prompt\": string, \"helper\": string}. The prompt must be under 16 words, specific to the situation, natural and never repeat information already known.",
-          },
-          {
-            role: "user",
-            content: `Report: "${ctx.text}"\nClassified as: ${ctx.category} › ${ctx.subcategory}\nAlready asked: ${ctx.asked.join(", ") || "nothing"}\nInformation still needed: ${question.slot}\nDefault wording: "${question.prompt}"`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(9000),
-    });
-    if (!res.ok) return question;
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const parsed = JSON.parse(json.choices?.[0]?.message?.content ?? "{}") as {
-      prompt?: string;
-      helper?: string;
-    };
-    return {
-      ...question,
-      prompt: parsed.prompt?.trim() || question.prompt,
-      helper: parsed.helper?.trim() || question.helper,
-    };
-  } catch {
-    return question;
-  }
-}
-
 export const MEMBERSHIP_OPTIONS = MEMBERSHIPS;
-export const SUBCATEGORY_LOOKUP = TAXONOMY;

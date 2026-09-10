@@ -2,6 +2,7 @@ import { classify, extractStudio } from "./ai";
 import { localEnrich, type AiInsight } from "./enrich";
 import { CATEGORIES, CATEGORY_META, TAXONOMY, metaFor, type Priority } from "./taxonomy";
 import { CATEGORY_DEPARTMENT } from "./org";
+import { suggestOwner } from "./issue-knowledge";
 import { buildQuestion, issueIntro, planSlots, type SlotId } from "./dynamic-chat";
 import { WHY, ack, closingLine, coachTip, progressNote, reactTo, timeGreeting } from "./conversation";
 import type { ChatMessage, ChatOption, ComposerContext, MomenceContext, TicketDraft } from "./types";
@@ -51,6 +52,8 @@ export type IntakeData = {
   atRisk?: boolean;
   occurredAt?: string;
   impact?: string;
+  /** Whether the fault is fixed at reporting time — the owner's first question. */
+  resolvedNow?: boolean;
   notes?: string;
   frequency?: string;
   actionTaken?: string;
@@ -63,6 +66,20 @@ export type IntakeData = {
   /** Additional problems the same report surfaced, kept with the primary ticket. */
   secondaryIssues?: { title: string; category: string; subcategory: string; summary: string }[];
 };
+
+/**
+ * Where a slot's value came from. `user` and `context` values are explicit
+ * human intent and may never be overwritten by the model without a correction;
+ * `agent` and `derived` values are machine judgement and can be revised freely.
+ */
+export type SlotSource = "user" | "context" | "agent" | "derived";
+
+/** Slot ids the model may not silently overwrite once a human set them. */
+export const HUMAN_LOCKED_SLOTS = new Set([
+  "category", "subcategory", "studio", "raisedFor", "member", "trainer",
+  "classInfo", "location", "systemAffected", "membershipRef", "occurredAt",
+  "impact", "atRisk", "resolvedNow", "momenceSessionId", "momenceMemberId",
+]);
 
 export type IntakeState = {
   step: string;
@@ -80,13 +97,40 @@ export type IntakeState = {
   pendingQuestionId?: string | null;
   /** Whether the studio-scoped session lookup has already been run this session. */
   autoLookupDone?: boolean;
+  /** Whether the member search has already been run this session. */
+  memberLookupDone?: boolean;
   /** Momence lookups already run this session, kept so they are never repeated. */
   toolResults?: { tool: string; args?: Record<string, unknown>; result: string }[];
   /** Insight computed once at draft time and reused on approval. */
   insight?: AiInsight;
+  /** Per-slot provenance — see SlotSource. */
+  slotSources?: Record<string, SlotSource>;
+  /** Compressed facts from the earlier part of a long conversation. */
+  contextSummary?: string;
+  /** How many transcript messages the summary already covers. */
+  summaryCovered?: number;
+  /** Draft-quality telemetry: how many edit rounds the reporter needed. */
+  editCount?: number;
+  outcome?: "approved";
+  approvedAt?: string;
 };
 
-export type EngineInput = { value?: string; text?: string; context?: ComposerContext };
+export function markSlotSource(
+  s: IntakeState,
+  key: string | string[],
+  source: SlotSource,
+): void {
+  const keys = Array.isArray(key) ? key : [key];
+  const next = { ...(s.slotSources ?? {}) };
+  for (const k of keys) next[k] = source;
+  s.slotSources = next;
+}
+
+export function slotSource(s: IntakeState, key: string): SlotSource | undefined {
+  return s.slotSources?.[key];
+}
+
+export type EngineInput = { value?: string; text?: string; context?: ComposerContext; sessionId?: string };
 
 export type EngineResult = {
   state: IntakeState;
@@ -122,7 +166,54 @@ export function emptyState(): IntakeState {
     asked: [],
     agentAsked: [],
     pendingQuestionId: null,
+    slotSources: {},
   };
+}
+
+/**
+ * Translate a structured option value into the words a reporter effectively
+ * said, so deterministic-path answers re-enter the transcript the agent reads.
+ */
+export function valueToWords(value: string, ctx: { studios: EngineContext["studios"] }): string {
+  if (!value) return "";
+  if (value.startsWith("ans:")) return value.slice(4);
+  if (value.startsWith("studio:")) {
+    if (value === "studio:none") return "This is not studio specific.";
+    const st = ctx.studios.find((x) => x.id === Number(value.slice(7)));
+    return st ? `The studio is ${st.name}, ${st.city}.` : "Picked the studio from the list.";
+  }
+  if (value.startsWith("session:")) {
+    const [, id, ...rest] = value.split(":");
+    const [name, at, teacher] = rest.join(":").split("|");
+    return `The class was ${[name, at, teacher && `taught by ${teacher}`].filter(Boolean).join(", ")}.`;
+  }
+  if (value.startsWith("member:")) {
+    const [, id, ...rest] = value.split(":");
+    return `The member is ${rest.length ? rest.join(":") : value.slice(7)}.`;
+  }
+  if (value.startsWith("for:")) return `Raised for: ${value.slice(4)}.`;
+  if (value.startsWith("class:")) return `The class was ${value.slice(6)}.`;
+  if (value.startsWith("loc:")) return `It happened in the ${value.slice(4)}.`;
+  if (value.startsWith("sys:")) return `The system affected is ${value.slice(4)}.`;
+  if (value.startsWith("when:")) return `It happened ${value.slice(5).toLowerCase()}.`;
+  if (value.startsWith("impact:")) return `Impact: ${value.slice(7)}.`;
+  if (value === "risk:yes") return "Someone is at risk right now.";
+  if (value === "risk:no") return "No immediate risk.";
+  if (value.startsWith("freq:")) return `Frequency: ${value.slice(5)}.`;
+  if (value.startsWith("membership:")) return `Membership: ${value.slice(11)}.`;
+  if (value.startsWith("mem:")) return `Membership: ${value.slice(4)}.`;
+  if (value.startsWith("trainer:")) return `The trainer was ${value.slice(8)}.`;
+  if (value.startsWith("cat:")) return `File this under ${value.slice(4)}.`;
+  if (value.startsWith("sub:")) return `The subcategory is ${value.slice(4)}.`;
+  if (value === "skip") return "Skip that one.";
+  if (value === "browse") return "Let me pick the category myself.";
+  if (value === "unknown") return "The trainer's name is not known.";
+  if (value === "showall") return "Show me all the options.";
+  if (value === "confirm:yes") return "That classification is right.";
+  if (value.startsWith("confirm:alt:")) return "Use a different classification.";
+  if (value.startsWith("prio:")) return `Priority: ${value.slice(5)}.`;
+  if (value === "edit" || value.startsWith("edit:")) return "I'd like to change something.";
+  return "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -500,6 +591,9 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   if (d.occurredAt) details["When"] = d.occurredAt;
   if (d.impact) details["Impact"] = IMPACT_LABEL[d.impact] ?? d.impact;
   if (d.atRisk !== undefined) details["Immediate risk"] = d.atRisk ? "Yes — escalated" : "No";
+  if (d.resolvedNow !== undefined) {
+    details["Current state"] = d.resolvedNow ? "Resolved / fixed at time of report" : "Still happening at time of report";
+  }
   if (d.memberContact) details["Member contact"] = d.memberContact;
   if (d.momenceMemberId) details["Momence member ID"] = String(d.momenceMemberId);
   if (d.frequency) details["Frequency"] = d.frequency;
@@ -513,6 +607,7 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   return {
     category,
     subcategory,
+    ownerHint: suggestOwner(category, subcategory),
     title: ai.title.slice(0, 140),
     summary: ai.summary,
     description: detailLines.join("\n\n"),
@@ -560,8 +655,9 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
 
 export function reviewMessage(s: IntakeState, ctx: EngineContext, insight?: AiInsight): ChatMessage {
   const draft = buildDraft(s, ctx, insight);
+  const first = ctx.reporter.name.split(" ")[0] || "there";
   return assistant(
-    "Here's your draft with my full read on it. Give it a look — approve and I'll route it straight to the right owner.",
+    `Here's your draft, ${first} — my full read on it. Give it a look, and approve when you're happy and I'll route it straight to the right owner.`,
     {
       kind: "draft",
       draft,
@@ -629,20 +725,12 @@ function ask(step: string, s: IntakeState, ctx: EngineContext, prefix?: string, 
 
 export function startSession(ctx: EngineContext): EngineResult {
   const state = emptyState();
+  const first = ctx.reporter.name.split(" ")[0] || "there";
   const greeting = assistant(
-    `${timeGreeting()}, ${ctx.reporter.name.split(" ")[0]} — Iris here. 👋\n\nJust tell me what happened in your own words, like you'd tell a colleague. I'll work out the category, pull the Momence details and only ask about the gaps.`,
+    `${timeGreeting()}, ${first} — Iris here. 👋\n\nTell me what happened in your own words, like you'd tell a colleague — where it was, which class or member it involves, and anything you've already done about it. I'll read the whole thing, pull the details from Momence, and only ask about what's genuinely missing.`,
     {
       allowFreeText: true,
-      placeholder: "e.g. Member says the AC in Studio 1 wasn't cooling during the 7am class today",
-      options: [
-        { label: "Something is broken", value: "cat:Repair and Maintenance" },
-        { label: "Class experience", value: "cat:Class Experience" },
-        { label: "Trainer feedback", value: "cat:Trainer Feedback" },
-        { label: "Scheduling", value: "cat:Scheduling" },
-        { label: "Billing / membership", value: "cat:Pricing and Memberships" },
-        { label: "Safety or theft", value: "cat:Safety and Security" },
-        { label: "Browse all categories", value: "browse", tone: "ghost" as const },
-      ],
+      placeholder: "e.g. The AC in Studio 1 wasn't cooling during the 7am class today",
     },
   );
   return { state, messages: [greeting] };

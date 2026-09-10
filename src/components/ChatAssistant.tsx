@@ -11,7 +11,7 @@ import { Avatar, CategoryChip, PriorityPill } from "./ui";
 import { useEscape } from "@/lib/use-escape";
 import { download, toHtml, toJson, toMarkdown, toPdf, toPlainText, toPng } from "@/lib/chat-export";
 import type { ChatMessage, ChatOption, ComposerContext, TicketDraft } from "@/lib/types";
-import { apiPost, apiPostStream } from "@/lib/api-client";
+import { ApiError, apiPost, apiPostStream } from "@/lib/api-client";
 
 function Rich({ text }: { text: string }) {
   return (
@@ -87,6 +87,11 @@ export function DraftCard({ draft }: { draft: TicketDraft }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[9px] font-semibold uppercase tracking-[0.24em] txt-3">Ticket draft</span>
           <span className="chip chip-line">{draft.department}</span>
+          {draft.ownerHint && (
+            <span className="chip chip-line !text-[9px]" title="Who usually owns these tickets, from the historic issue patterns">
+              Suggested owner: {draft.ownerHint}
+            </span>
+          )}
           <span className="ml-auto flex items-center gap-1.5">
             <span className="chip" style={{ background: "var(--surface-3)", color: sevColor }}>{sev}</span>
             <PriorityPill priority={draft.priority} />
@@ -336,6 +341,21 @@ const CAPTURE_FIELDS: { key: string; label: string; format?: (v: unknown) => str
   { key: "atRisk", label: "Risk", format: (v) => (v ? "Yes" : "No") },
 ];
 
+// Some preview proxies mangle POST + Accept: text/event-stream requests (the
+// browser sees an immediate 400 while the identical JSON POST succeeds). Once
+// detected, stop paying the double round-trip on every send: remember it for
+// this browser session and go straight to plain JSON.
+let streamBlocked = false;
+try {
+  if (typeof sessionStorage !== "undefined") streamBlocked = sessionStorage.getItem("iris:streamBlocked") === "1";
+} catch {}
+function rememberStreamBlocked(): void {
+  streamBlocked = true;
+  try {
+    sessionStorage.setItem("iris:streamBlocked", "1");
+  } catch {}
+}
+
 export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const { user } = useUser();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -410,7 +430,7 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
       try {
         let result: TurnResult | null = null;
         let sawServer = false;
-        if (streamable) {
+        if (streamable && !streamBlocked) {
           try {
             await apiPostStream("/api/chat/stream", request, {
               status: (d) => {
@@ -430,7 +450,14 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
                 sawServer = true;
               },
             });
-          } catch {
+          } catch (err) {
+            if (
+              !sawServer &&
+              err instanceof ApiError &&
+              [400, 403, 413, 415, 422].includes(err.status)
+            ) {
+              rememberStreamBlocked();
+            }
             // Fall through to the decision below.
           }
         }
@@ -442,13 +469,14 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
         }
         if (!result) throw new Error("stream ended without a result");
         apply(result);
-      } catch {
+      } catch (err) {
+        const reason = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
         setMessages((prev) => [
           ...prev,
           {
             id: `e${Date.now()}`,
             role: "assistant",
-            content: "Sorry — I couldn't reach the ticketing service. Please try again.",
+            content: `Sorry — I couldn't reach the ticketing service. Please try again.${reason}`,
             createdAt: new Date().toISOString(),
           },
         ]);

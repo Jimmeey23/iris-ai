@@ -1,6 +1,6 @@
 import type { IntakeData } from "./chat-engine";
 import type { SlotId } from "./dynamic-chat";
-import { getOpenAiKey, getSetting } from "./settings";
+import { chatJson } from "./llm";
 
 /* ------------------------------------------------------------------ */
 /* Conversational voice — warm, brief, human                           */
@@ -172,66 +172,46 @@ export async function humanise(input: {
   reporterFirstName: string;
   remaining: number;
 }): Promise<Rewritten | null> {
-  const key = await getOpenAiKey();
-  if (!key.startsWith("sk-")) return null;
-  const model = (await getSetting("openai_model")) || process.env.OPENAI_MODEL || "gpt-4o-mini";
-
   const knownLines = Object.entries(input.known)
     .filter(([, v]) => v)
     .map(([k, v]) => `${k}: ${v}`)
     .join("; ");
 
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        temperature: 0.55,
-        max_tokens: 150,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content: [
-              "You are Iris, a warm and efficient intake assistant for Physique 57, a boutique barre studio group in India.",
-              "You are talking to a staff member who is logging an issue. Be friendly, concise and human — never corporate or robotic.",
-              "Return strict JSON: {\"ack\": string, \"prompt\": string, \"helper\": string}.",
-              "ack: at most 8 words reacting to what they just told you. Can be empty string.",
-              "prompt: the next question, under 16 words, specific to this situation, never repeating known facts.",
-              "helper: at most 14 words explaining why you need it or how to answer. Can be empty string.",
-              "Never invent facts. Never ask for something already known. Use British English.",
-            ].join(" "),
-          },
-          {
-            role: "user",
-            content: [
-              `Staff member: ${input.reporterFirstName}`,
-              `What they reported: "${input.report}"`,
-              `Classified as: ${input.category} › ${input.subcategory}`,
-              `Already known — ${knownLines || "nothing yet"}`,
-              `Already asked: ${input.asked.join(", ") || "nothing"}`,
-              `Still needed: ${input.slot}`,
-              `Questions remaining after this: ${Math.max(0, input.remaining - 1)}`,
-              `Default wording: "${input.defaultPrompt}"`,
-            ].join("\n"),
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(9000),
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const parsed = JSON.parse(json.choices?.[0]?.message?.content ?? "{}") as Rewritten;
-    if (!parsed.prompt?.trim()) return null;
-    return {
-      prompt: parsed.prompt.trim(),
-      helper: parsed.helper?.trim() || undefined,
-      ack: parsed.ack?.trim() || undefined,
-    };
-  } catch {
-    return null;
-  }
+  // Cosmetic wording only — fast tier, short timeout, single attempt.
+  const res = await chatJson<Rewritten>({
+    system: [
+      "You are Iris, a warm and efficient intake assistant for Physique 57, a boutique barre studio group in India.",
+      "You are talking to a staff member who is logging an issue. Be friendly, concise and human — never corporate or robotic.",
+      'Return strict JSON: {"ack": string, "prompt": string, "helper": string}.',
+      "ack: at most 8 words reacting to what they just told you. Can be empty string.",
+      "prompt: the next question, under 16 words, specific to this situation, never repeating known facts.",
+      "helper: at most 14 words explaining why you need it or how to answer. Can be empty string.",
+      "Never invent facts. Never ask for something already known. Use British English.",
+    ].join(" "),
+    user: [
+      `Staff member: ${input.reporterFirstName}`,
+      `What they reported: "${input.report.slice(0, 1500)}"`,
+      `Classified as: ${input.category} › ${input.subcategory}`,
+      `Already known — ${knownLines || "nothing yet"}`,
+      `Already asked: ${input.asked.join(", ") || "nothing"}`,
+      `Still needed: ${input.slot}`,
+      `Questions remaining after this: ${Math.max(0, input.remaining - 1)}`,
+      `Default wording: "${input.defaultPrompt}"`,
+    ].join("\n"),
+    tier: "fast",
+    temperature: 0.55,
+    maxTokens: 150,
+    timeoutMs: 9000,
+    retries: 0,
+    feature: "copy",
+  });
+  const parsed = res.data;
+  if (!res.ok || !parsed?.prompt?.trim()) return null;
+  return {
+    prompt: parsed.prompt.trim(),
+    helper: parsed.helper?.trim() || undefined,
+    ack: parsed.ack?.trim() || undefined,
+  };
 }
 
 /** Friendly closing line once the ticket is raised. */

@@ -43,6 +43,20 @@
       "when": 1788501386072,
       "tag": "0005_stormy_bucky",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789045634703,
+      "tag": "0006_ai_context_and_telemetry",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789057950210,
+      "tag": "0007_inbound_emails",
+      "breakpoints": true
     }
   ]
 }
