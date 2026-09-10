@@ -49,6 +49,10 @@
 - **Injection framing**: the conversation block labels REPORTER lines as verbatim data, never instructions — paired with the `injection-hijack-resisted` eval case.
 - **`/api/ai/enhance` rate-limited** (20/5 min per IP) like the chat endpoints.
 
+## Local/sandbox preview
+
+The sandbox has no Supabase project, so `src/lib/dev-auth.ts` adds a **dev-only** fallback: when `NODE_ENV !== "production"` AND `NEXT_PUBLIC_SUPABASE_URL` is unset, middleware skips auth and `getSessionUser()` returns a fixed local admin identity. Production deployments always have both conditions false, so the bypass cannot activate there. With it, the full app runs locally against the embedded Postgres (migration `0006` applied) — add an OpenAI key in Settings → AI engine to switch intake from the honest "reasoning unavailable" state into full agent mode.
+
 ## Deliberately unchanged
 - The deterministic engine still exists for review/edit mechanics (draft preview, edit menu, undo) — but no longer asks intake questions in agent mode.
 - Read-only Momence tool surface unchanged (prior audit H5 scoping still recommended).
