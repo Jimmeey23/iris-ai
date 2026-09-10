@@ -286,10 +286,26 @@ const TEXT_ANSWER_SLOTS = new Set([
 /** Bind a direct typed reply to the question it answers before asking the model
  * to reason further. The model can still refine it, but cannot accidentally
  * omit the answer from structured state. */
+const DECLINED_ANSWER = /^(skip|pass|don'?t know|dunno|no idea|not sure|unknown|n\/a|not applicable)[.!]?$/i;
+
 function bindPendingTextAnswer(text: string, s: IntakeState): void {
   const pending = s.pendingQuestionId;
   const answer = text.trim();
-  if (!pending || !answer || /^(skip|don'?t know|not sure|unknown|n\/a|not applicable)[.!]?$/i.test(answer)) return;
+  if (!pending || !answer) return;
+  if (DECLINED_ANSWER.test(answer)) {
+    // "Not sure" is not agreement. When we asked the reporter to confirm a blast
+    // radius the model had merely inferred, an unknown answer must drop that
+    // guess rather than let it go on driving severity and the SLA clock — the
+    // whole point of asking was that we did not trust it.
+    if (pending === "impact" && slotSource(s, "impact") === "agent") {
+      s.data.impact = undefined;
+      s.data.extraDetails = {
+        ...(s.data.extraDetails ?? {}),
+        "Members affected": "Reporter could not confirm a count at intake",
+      };
+    }
+    return;
+  }
   if (pending === "resolvedNow") {
     if (/^(yes|resolved|fixed|restored|back)\b/i.test(answer)) s.data.resolvedNow = true;
     else if (/^(no|still|not|unresolved)\b/i.test(answer)) s.data.resolvedNow = false;
@@ -793,7 +809,13 @@ export async function runAgentTurn(
   }
 
   // Nothing was actually said — don't spend a model call on an empty turn.
-  const hasNarrative = utterance || transcript.some((m) => m.role === "user" && m.content.trim());
+  // A button whose words are empty ("Retry reasoning") still belongs to a
+  // conversation that has a report in it, so the captured narrative counts too
+  // — otherwise retrying restarts the reporter from "tell me what happened".
+  const hasNarrative =
+    utterance ||
+    Boolean(s.data.rawText?.trim()) ||
+    transcript.some((m) => m.role === "user" && m.content.trim());
   if (!hasNarrative) {
     return {
       state: s,
@@ -905,6 +927,49 @@ export async function runAgentTurn(
   // Never disguise a rules questionnaire as AI. Preserve the reporter's words
   // and make a transient/configuration failure explicit so the turn can retry.
   if (!result.ok || !result.turn) {
+    const failures = (s.agentFailures ?? 0) + 1;
+    s.agentFailures = failures;
+
+    // Offering "Retry reasoning" against a deterministic failure produces the
+    // same message forever, and the reporter's account is trapped behind it. So
+    // a second failure stops asking and does the useful thing instead: build the
+    // draft from everything already captured, and say plainly that the last
+    // reasoning pass did not complete so the reporter knows to check it.
+    if (failures >= 2 && s.data.rawText?.trim()) {
+      if (s.data.studioName === undefined) {
+        s.data.studioId = null;
+        s.data.studioName = "Not studio specific";
+      }
+      const fallbackInsight = await insightFromAgent({
+        text: narrative,
+        category: s.data.category ?? "Miscellaneous",
+        subcategory: s.data.subcategory ?? "",
+        impact: s.data.impact,
+        atRisk: s.data.atRisk,
+        resolvedNow: s.data.resolvedNow,
+        studioName: s.data.studioName,
+        memberName: s.data.memberName,
+        trainerName: s.data.trainerName,
+        classInfo: s.data.classInfo,
+      });
+      s.step = "review";
+      s.insight = fallbackInsight;
+      s.pendingQuestionId = null;
+      return {
+        state: s,
+        usedAgent: true,
+        userUtterance: utterance,
+        degraded: result.error ?? "agent-unavailable",
+        model: result.model,
+        messages: [
+          assistantMessage(
+            `My last reasoning pass didn't complete, ${firstName(ctx)}, so I've built the draft from everything you told me rather than making you repeat it. Worth a closer read than usual before you approve.`,
+          ),
+          reviewMessage(s, ctx, fallbackInsight),
+        ],
+      };
+    }
+
     s.step = "agent_unavailable";
     return {
       state: s,
@@ -920,6 +985,8 @@ export async function runAgentTurn(
       ],
     };
   }
+  // A pass that completed clears the failure streak.
+  s.agentFailures = 0;
 
   // The model is asked to flag a greeting itself, but it is not the authority on
   // this: a bare "hi" is deterministically not a report, whatever it returned.

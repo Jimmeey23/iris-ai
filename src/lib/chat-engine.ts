@@ -101,6 +101,12 @@ export type IntakeState = {
    */
   agentAskLog?: { id: string; ask: string }[];
   pendingQuestionId?: string | null;
+  /**
+   * Consecutive reasoning-pass failures. A retry that keeps failing must not
+   * loop the reporter forever on the same message, so the count decides when to
+   * fall back to a draft built from what is already known.
+   */
+  agentFailures?: number;
   /** Whether the studio-scoped session lookup has already been run this session. */
   autoLookupDone?: boolean;
   /** Whether the member search has already been run this session. */

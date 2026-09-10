@@ -326,6 +326,110 @@ it("carries a question it asked but never got an answer to onto the ticket", asy
   expect(out.state.data.extraDetails?.["Still to confirm"]).toContain("11 am FIT");
 });
 
+/* ------------------------------------------------------------------ */
+/* A model turn that says two things at once is not a failure           */
+/* ------------------------------------------------------------------ */
+
+it("treats readyForDraft alongside a question as a question turn, not an error", async () => {
+  // The model does not want to drop the question it just asked, so it returns
+  // both. Rejecting that dead-ended the whole conversation.
+  const { isCoherentAgentTurn } = await import("./agent");
+  const both = turn({
+    readyForDraft: true,
+    nextQuestion: { id: "custom:cause", ask: "Who's looking at the supply?" },
+  });
+  // Raw payloads like this are exactly what the old pre-normalisation check
+  // rejected outright.
+  expect(isCoherentAgentTurn(both)).toBe(false);
+
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: both });
+  const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
+  expect(out.degraded).toBeUndefined();
+});
+
+/* ------------------------------------------------------------------ */
+/* A failing reasoning pass must not trap the report                    */
+/* ------------------------------------------------------------------ */
+
+function reportState() {
+  const s = emptyState();
+  s.data = {
+    rawText: outage,
+    studioName: "Kwality House, Kemps Corner",
+    studioId: 1,
+    category: "Repair and Maintenance",
+    subcategory: "Power Outage / Utility Failure",
+    resolvedNow: false,
+    occurredAt: "Earlier today",
+    frequency: "First time",
+    raisedFor: "Noticed by staff",
+  };
+  return s;
+}
+
+it("offers a retry on the first reasoning failure", async () => {
+  vi.mocked(runAgent).mockResolvedValue({ ok: false, latencyMs: 0, error: "incoherent-agent-turn" });
+  const out = await runAgentTurn(reportState(), [], { text: "Not sure" }, ctx);
+  expect(out.state.step).toBe("agent_unavailable");
+  expect(out.state.agentFailures).toBe(1);
+});
+
+it("stops looping and drafts from what it has when the retry fails too", async () => {
+  vi.mocked(runAgent).mockResolvedValue({ ok: false, latencyMs: 0, error: "incoherent-agent-turn" });
+  const history = [
+    { id: "u1", role: "user" as const, content: outage, createdAt: new Date().toISOString() },
+  ];
+  const first = await runAgentTurn(reportState(), history, { text: "Not sure" }, ctx);
+  const second = await runAgentTurn(first.state, history, { value: "retry" }, ctx);
+  expect(second.state.step).toBe("review");
+  expect(second.state.insight?.title).toBeTruthy();
+  expect(second.messages.some((m) => m.kind === "draft")).toBe(true);
+  expect(second.messages[0].content).toMatch(/didn't complete/i);
+});
+
+it("clears the failure streak once a pass completes", async () => {
+  vi.mocked(runAgent).mockResolvedValueOnce({ ok: false, latencyMs: 0, error: "boom" });
+  const failed = await runAgentTurn(reportState(), [], { text: "Not sure" }, ctx);
+  expect(failed.state.agentFailures).toBe(1);
+  vi.mocked(runAgent).mockResolvedValueOnce({ ok: true, latencyMs: 0, turn: turn() });
+  const ok = await runAgentTurn(failed.state, [], { text: "power is back" }, ctx);
+  expect(ok.state.agentFailures).toBe(0);
+});
+
+/* ------------------------------------------------------------------ */
+/* "Not sure" is an answer, not agreement                               */
+/* ------------------------------------------------------------------ */
+
+it("drops an inferred blast radius the reporter could not confirm", async () => {
+  const s = reportState();
+  s.step = "agent_q";
+  s.data.impact = "many";
+  s.slotSources = { impact: "agent" };
+  s.agentAsked = ["impact"];
+  s.agentAskLog = [{ id: "impact", ask: "How many members were actually affected?" }];
+  s.pendingQuestionId = "impact";
+
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(s, [], { text: "Not sure" }, ctx);
+  // The guess must not go on driving severity once it was explicitly unconfirmed.
+  expect(out.state.data.impact).toBeUndefined();
+  expect(out.state.data.extraDetails?.["Members affected"]).toMatch(/could not confirm/i);
+  expect(out.state.data.extraDetails?.["Still to confirm"]).toMatch(/how many members/i);
+});
+
+it("keeps a blast radius the reporter confirmed themselves", async () => {
+  const s = reportState();
+  s.step = "agent_q";
+  s.data.impact = "many";
+  s.slotSources = { impact: "user" };
+  s.agentAsked = ["impact"];
+  s.pendingQuestionId = "impact";
+
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(s, [], { text: "Not sure" }, ctx);
+  expect(out.state.data.impact).toBe("many");
+});
+
 it("does not flag a question the reporter actually answered", async () => {
   const state = emptyState();
   state.step = "agent_q";

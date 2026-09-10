@@ -232,7 +232,8 @@ A detailed report is not the same as a complete one. Going straight to the draft
 
 Rank the gaps and ask the biggest one first. A reporter who answers three questions and never gets asked the obvious one concludes you were not listening. On an unresolved fault the ordering is almost always: what is being done about the cause → who or how many were affected and what they were offered → the smaller identifying details. Never spend the turn on a name when the cause is still unknown.
 Use the answer you just received. If the reporter tells you a fault is still live, your very next move reflects that: acknowledge it as live, and make your next question or your draft about getting it fixed and about the members sitting in it. Asking for a status and then filing the ticket as though the answer never arrived is the worst thing you can do to them.
-Never abandon a question you have just asked. If it goes unanswered because the reporter says something else, and it still matters, carry it into the draft as an open item rather than pretending it was answered or silently forgetting it — put it in extraDetails under a label such as "Still to confirm".
+Never abandon a question you have just asked. If it goes unanswered because the reporter said something else or did not know, and it still matters, carry it into the draft as an open item rather than pretending it was answered or silently forgetting it — put it in extraDetails under a label such as "Still to confirm". Carrying it forward is an extraDetails entry, NOT a nextQuestion: when readyForDraft is true, nextQuestion must still be null. Never emit both.
+"I don't know" and "not sure" are answers, and what they tell you is that the fact is unknown — not that your guess was right. If you had inferred a value and the reporter cannot confirm it, drop the inference and record the field as unconfirmed. Never re-ask the same question hoping for a better answer.
 
 ALWAYS ESTABLISH THESE BEFORE DRAFTING — ask, or look them up, whenever they are relevant and unknown:
 - Whether the problem is RESOLVED or still happening right now (resolvedNow). For any fault — an outage, a leak, a broken machine, a system down — this decides whether the owner is fixing something live or writing it up after the fact. Never draft an unresolved-sounding fault without knowing its current state.
@@ -441,16 +442,18 @@ Produce the JSON for this turn.`;
     return { ok: false, error: res.error, latencyMs: res.latencyMs, model: res.model };
   }
 
-  if (!isCoherentAgentTurn(res.data)) {
+  // Coherence is judged on the NORMALISED turn, never the raw payload.
+  // normaliseTurn exists to resolve exactly the conflicts a capable model still
+  // produces — most often readyForDraft=true alongside a nextQuestion it did not
+  // want to drop. Checking first threw those away as hard errors and dead-ended
+  // the conversation, when the resolution ("it's a question turn") was already
+  // deterministic. What remains rejected is a turn that says nothing at all.
+  const turn = normaliseTurn(res.data, transcript);
+  if (!isCoherentAgentTurn(turn)) {
     return { ok: false, error: "incoherent-agent-turn", latencyMs: res.latencyMs, model: res.model };
   }
 
-  return {
-    ok: true,
-    turn: normaliseTurn(res.data, transcript),
-    latencyMs: res.latencyMs,
-    model: res.model,
-  };
+  return { ok: true, turn, latencyMs: res.latencyMs, model: res.model };
 }
 
 /* ------------------------------------------------------------------ */
