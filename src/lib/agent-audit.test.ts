@@ -134,7 +134,17 @@ it("auto-matches outage context from the first message", async () => {
   const out = await runAgentTurn(emptyState(), [], { text: report }, ctx);
   expect(out.state.data.studioName).toContain("Kemps Corner");
   expect(out.state.data.occurredAt).toBe("Earlier today");
-  expect(out.state.data.classInfo).toContain("10AM");
+  // Times are normalised: "10 am" and "11. 30am" become real clock times, and
+  // a stray "30AM" fragment can no longer reach the ticket.
+  expect(out.state.data.classInfo).toContain("10:00 AM");
+  // Every listed time must be a whole clock time, never a fragment like "30 AM"
+  // left behind when "11. 30am" could not be matched as one token.
+  const listedTimes = (out.state.data.classInfo ?? "")
+    .split("(")[0]
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  expect(listedTimes).toEqual(["10:00 AM", "10:30 AM", "11:00 AM"]);
   expect(out.state.data.classInfo).toContain("Power Cycle");
   expect(out.state.data.actionTaken).toBe(report);
   expect(out.state.data.rawText).toContain(report);

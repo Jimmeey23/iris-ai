@@ -10,7 +10,39 @@ const CLASS_ALIASES: { re: RegExp; value: string }[] = [
   { re: /\b(?:bbb|barre beyond basics)\b/i, value: "Barre Beyond Basics" },
   { re: /\b(?:power\s*cycle|cycle)\b/i, value: "Power Cycle" },
   { re: /\b(?:studio\s*fit|fit)\b/i, value: "Studio FIT" },
+];
+
+/**
+ * Clock times, normalised to "10:30 AM".
+ *
+ * Staff type times loosely — "10 am", "10.30am", "11. 30am", "6:15 PM". The
+ * previous pattern could not span the space in "11. 30am", so it backtracked
+ * and matched the bare "30am", putting a meaningless "30AM" on the ticket.
+ * Minutes are therefore allowed to sit across a space, and any hour above 12
+ * or minute above 59 is discarded rather than emitted as a fragment.
+ */
+export function extractTimes(text: string): string[] {
+  const out: string[] = [];
+  const re = /\b(\d{1,2})\s*[.:]\s*(\d{2})\s*(am|pm)\b|\b(\d{1,2})\s*(am|pm)\b/gi;
+  for (const m of text.matchAll(re)) {
+    const hour = Number(m[1] ?? m[4]);
+    const minute = m[2] ? Number(m[2]) : 0;
+    const meridiem = (m[3] ?? m[5] ?? "").toUpperCase();
+    if (!Number.isFinite(hour) || hour < 1 || hour > 12 || minute > 59) continue;
+    out.push(`${hour}:${String(minute).padStart(2, "0")} ${meridiem}`);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * Rooms that read like class names. "Strength Lab" is a space you move a class
+ * INTO, so listing it as a class affected by an outage is simply wrong — it was
+ * the one room that still had power.
+ */
+const ROOM_ALIASES: { re: RegExp; value: string }[] = [
   { re: /\bstrength\s*lab\b/i, value: "Strength Lab" },
+  { re: /\bcycle\s*(?:room|studio)\b/i, value: "Cycle room" },
+  { re: /\bstudio\s*([12])\b/i, value: "Studio $1" },
 ];
 
 export const LOCATIONS = [
@@ -158,8 +190,15 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
     }
   }
   if (d.location === undefined) {
+    const room = ROOM_ALIASES.map((r) => {
+      const m = text.match(r.re);
+      return m ? r.value.replace("$1", m[1] ?? "") : null;
+    }).find(Boolean);
     const hit = LOCATION_PATTERNS.find((p) => p.re.test(text));
-    if (hit) {
+    if (room) {
+      d.location = room;
+      note(`Location · ${room}`);
+    } else if (hit) {
       d.location = hit.value;
       note(`Location · ${hit.value}`);
     }
@@ -195,17 +234,14 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
   }
   if (d.classInfo === undefined) {
     // A single report often spans several classes — keep all of them.
-    const times = [...text.matchAll(/\b(\d{1,2}[.:]?\d{0,2}\s?(?:am|pm))\b/gi)].map((m) =>
-      m[1].toUpperCase().replace(/\s+/g, " "),
-    );
+    const times = extractTimes(text);
     const formats = CLASS_FORMATS.filter(
       (f) => f !== "Not class specific" && text.toLowerCase().includes(f.toLowerCase()),
     );
     for (const alias of CLASS_ALIASES) {
       if (alias.re.test(text) && !formats.includes(alias.value)) formats.push(alias.value);
     }
-    const legacyTime = text.match(MEMBER_TIME_RE)?.[1];
-    const uniqueTimes = [...new Set(times.length ? times : legacyTime ? [legacyTime.toUpperCase()] : [])];
+    const uniqueTimes = times;
     if (uniqueTimes.length || formats.length) {
       const value =
         uniqueTimes.length && formats.length

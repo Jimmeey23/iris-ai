@@ -75,10 +75,15 @@ it.each(["describe", "agent_q"] as const)("renders the power-outage question onc
   const result = await runAgentTurn(state, [], { text: "There was no electricity for an hour at Kemps Corner." }, ctx);
   expect(result.messages).toHaveLength(1);
   expect(result.messages[0].content.split(ask)).toHaveLength(2);
-  expect(result.messages[0].content).toContain("Got it, Jimmeey.");
+  // The card is the question and its answers only: the model's acknowledgement,
+  // the why-line, the detected chips and the analysis grid all used to sit
+  // around the question and buried it. Detected facts live in the capture panel.
+  expect(result.messages[0].content).toBe(ask);
+  expect(result.messages[0].content).not.toContain("Got it, Jimmeey.");
   expect(result.messages[0].options).toHaveLength(2);
   expect(result.state.pendingQuestionId).toBe("resolvedNow");
-  expect(Boolean(result.messages[0].analysis)).toBe(step === "describe");
+  expect(result.messages[0].analysis).toBeUndefined();
+  expect(result.messages[0].inferred).toBeUndefined();
 });
 
 it("removes the model's original ask when a routing gate replaces it", async () => {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getSessionAttendees,
+  getSession,
   formatSession,
   getDirectory,
   getMemberBookings,
@@ -126,10 +127,26 @@ export async function GET(request: Request) {
       }
 
       case "attendees": {
-        const sessionId = Number(searchParams.get("sessionId"));
-        if (!sessionId) return NextResponse.json({ error: "sessionId required" }, { status: 400 });
-        const attendees = await getSessionAttendees(sessionId);
-        return NextResponse.json({ attendees });
+        // One incident can span several classes, so the roster is the union of
+        // the chosen sessions with each row tagged by the session it came from.
+        const ids = (searchParams.get("sessionIds") ?? searchParams.get("sessionId") ?? "")
+          .split(",")
+          .map((v) => Number(v.trim()))
+          .filter((v) => Number.isFinite(v) && v > 0)
+          .slice(0, 10);
+        if (!ids.length) return NextResponse.json({ error: "sessionId required" }, { status: 400 });
+
+        const sessions = await Promise.all(
+          ids.map(async (sessionId) => {
+            const [rows, session] = await Promise.all([
+              getSessionAttendees(sessionId).catch(() => []),
+              getSession(sessionId).catch(() => null),
+            ]);
+            const sessionName = session?.name ?? `Session ${sessionId}`;
+            return rows.map((a) => ({ ...a, sessionId, sessionName }));
+          }),
+        );
+        return NextResponse.json({ attendees: sessions.flat() });
       }
 
       case "directory": {

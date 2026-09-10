@@ -327,6 +327,153 @@ it("carries a question it asked but never got an answer to onto the ticket", asy
 });
 
 /* ------------------------------------------------------------------ */
+/* Time parsing and rooms vs classes                                    */
+/* ------------------------------------------------------------------ */
+
+it("reads a time split by punctuation instead of emitting a fragment", async () => {
+  const { extractTimes } = await import("./chat-inference");
+  // "11. 30am" is the shape that produced a bare "30AM" on the ticket.
+  expect(extractTimes("at 11. 30am the cooler was moved")).toEqual(["11:30 AM"]);
+  expect(extractTimes("BBB at 10 am, cycle at 10.30am and FIT at 11 am")).toEqual([
+    "10:00 AM",
+    "10:30 AM",
+    "11:00 AM",
+  ]);
+});
+
+it("discards impossible clock values rather than passing them through", async () => {
+  const { extractTimes } = await import("./chat-inference");
+  expect(extractTimes("call 98765 43210 am")).toEqual([]);
+  expect(extractTimes("at 25 am")).toEqual([]);
+  expect(extractTimes("at 10:75 am")).toEqual([]);
+});
+
+it("treats a room as a location, never as a class", async () => {
+  const { inferFromText } = await import("./chat-inference");
+  const s = emptyState();
+  inferFromText(outage, s, ctx);
+  expect(s.data.location).toBe("Strength Lab");
+  expect(s.data.classInfo ?? "").not.toMatch(/strength lab/i);
+});
+
+it("marks regex-extracted facts as the machine's reading, not the reporter's word", async () => {
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({ readyForDraft: false, nextQuestion: { id: "studio", ask: "Which studio?" } }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
+  // Labelling these "user" human-locked them: the model could not correct the
+  // class list and the controller suppressed every question about it.
+  expect(out.state.slotSources?.classInfo).toBe("agent");
+  expect(out.state.slotSources?.classInfo).not.toBe("user");
+});
+
+/* ------------------------------------------------------------------ */
+/* Momence pickers replace guessing                                     */
+/* ------------------------------------------------------------------ */
+
+it("offers a multi-select session picker rather than guessing the classes", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(true);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      slots: {
+        studio: { value: "Kemps Corner" },
+        raisedFor: { value: "Noticed by staff" },
+        resolvedNow: { value: false },
+        occurredAt: { value: "Earlier today" },
+        frequency: { value: "First time" },
+      },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
+  expect(out.state.pendingQuestionId).toBe("sessions");
+  expect(out.messages[0].picker).toBe("sessions");
+});
+
+it("does not offer a session picker when Momence is unavailable", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
+  expect(out.state.agentAsked ?? []).not.toContain("sessions");
+});
+
+it("records every picked session and moves on to the roster", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(true);
+  const s = emptyState();
+  s.step = "agent_q";
+  s.data = {
+    rawText: outage,
+    studioName: "Kwality House, Kemps Corner",
+    studioId: 1,
+    resolvedNow: false,
+  };
+  s.agentAsked = ["sessions"];
+  s.pendingQuestionId = "sessions";
+
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(
+    s,
+    [],
+    { value: "sessions:101|Barre Beyond Basics · 10:00 am;;102|Power Cycle · 10:30 am" },
+    ctx,
+  );
+  expect(out.state.data.momenceSessionIds).toEqual([101, 102]);
+  expect(out.state.data.classInfo).toBe("Barre Beyond Basics · 10:00 am; Power Cycle · 10:30 am");
+  // Real session ids beat anything parsed from prose, so they are human-set.
+  expect(out.state.slotSources?.classInfo).toBe("user");
+  expect(out.state.pendingQuestionId).toBe("attendees");
+  expect(out.messages[0].picker).toBe("attendees");
+});
+
+it("takes the affected members from the roster instead of inferring a blast radius", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(true);
+  const s = emptyState();
+  s.step = "agent_q";
+  s.data = {
+    rawText: outage,
+    studioName: "Kwality House, Kemps Corner",
+    studioId: 1,
+    momenceSessionIds: [101, 102],
+    resolvedNow: false,
+    occurredAt: "Earlier today",
+    frequency: "First time",
+    raisedFor: "Noticed by staff",
+  };
+  s.agentAsked = ["sessions", "attendees"];
+  s.pendingQuestionId = "attendees";
+
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(s, [], { value: "members:55|Anita Rao;;56|Dev Shah" }, ctx);
+  expect(out.state.data.affectedMembers).toBe("Anita Rao, Dev Shah");
+  expect(out.state.data.impact).toBe("many");
+  expect(out.state.slotSources?.impact).toBe("user");
+});
+
+it("records one picked attendee as a single-member impact", async () => {
+  const s = emptyState();
+  s.step = "agent_q";
+  s.data = { rawText: outage, momenceSessionIds: [102] };
+  s.pendingQuestionId = "attendees";
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(s, [], { value: "members:55|Anita Rao" }, ctx);
+  expect(out.state.data.impact).toBe("single");
+  expect(out.state.data.memberName).toBe("Anita Rao");
+});
+
+it("accepts 'nobody specific' without inventing an impact", async () => {
+  const s = emptyState();
+  s.step = "agent_q";
+  s.data = { rawText: outage, momenceSessionIds: [102] };
+  s.pendingQuestionId = "attendees";
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const out = await runAgentTurn(s, [], { value: "members:none" }, ctx);
+  expect(out.state.data.affectedMembers).toBe("None specifically identified");
+});
+
+/* ------------------------------------------------------------------ */
 /* A model turn that says two things at once is not a failure           */
 /* ------------------------------------------------------------------ */
 

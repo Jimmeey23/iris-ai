@@ -196,6 +196,57 @@ function absorbInput(
 
   if (value.startsWith("ans:")) return { utterance: value.slice(4), inferred };
 
+  // Multi-select Momence answers. One incident routinely spans several classes,
+  // so these carry the whole selection: "sessions:<id>|<label>;;<id>|<label>".
+  // Real ids beat any text we parsed out of the report, so they are human-set.
+  if (value.startsWith("sessions:")) {
+    const rest = value.slice(9);
+    markSlotSource(s, ["classInfo", "momenceSessionId"], "user");
+    if (rest === "none" || !rest.trim()) {
+      d.momenceSessionIds = [];
+      return { utterance: "None of those classes were the ones affected.", inferred };
+    }
+    const picked = rest
+      .split(";;")
+      .map((part) => {
+        const [id, ...label] = part.split("|");
+        return { id: Number(id), label: label.join("|").trim() };
+      })
+      .filter((p) => Number.isFinite(p.id) && p.label);
+    if (picked.length) {
+      d.momenceSessionIds = picked.map((p) => p.id);
+      d.momenceSessionId = picked[0].id;
+      d.classInfo = picked.map((p) => p.label).join("; ");
+      return {
+        utterance: `The classes affected were ${d.classInfo}.`,
+        inferred,
+      };
+    }
+  }
+
+  if (value.startsWith("members:")) {
+    const rest = value.slice(8);
+    markSlotSource(s, ["affectedMembers", "impact"], "user");
+    if (rest === "none" || !rest.trim()) {
+      d.affectedMembers = "None specifically identified";
+      return { utterance: "No specific members need following up.", inferred };
+    }
+    const names = rest
+      .split(";;")
+      .map((part) => part.split("|").slice(1).join("|").trim())
+      .filter(Boolean);
+    if (names.length) {
+      d.affectedMembers = names.join(", ");
+      // A real roster count is the honest blast radius — no more guessing.
+      d.impact = names.length > 1 ? "many" : "single";
+      if (names.length === 1 && !d.memberName) d.memberName = names[0];
+      return {
+        utterance: `${names.length} member${names.length === 1 ? "" : "s"} affected: ${d.affectedMembers}.`,
+        inferred,
+      };
+    }
+  }
+
   if (value === "resolvedNow:yes" || value === "resolvedNow:no") {
     d.resolvedNow = value === "resolvedNow:yes";
     markSlotSource(s, "resolvedNow", "user");
@@ -697,31 +748,27 @@ function studioOptions(ctx: EngineContext): ChatOption[] {
   return opts;
 }
 
+/**
+ * A question card is the question and the ways to answer it — nothing else.
+ *
+ * It previously also carried an acknowledgement sentence, a why-line, a row of
+ * green "detected" chips and a four-cell category/confidence grid, which buried
+ * the actual question in the middle of the card and repeated facts the capture
+ * panel already shows. Detected facts belong in that panel, not in the bubble.
+ */
 function questionMessage(
   q: AgentQuestion,
-  reply: string,
   s: IntakeState,
   ctx: EngineContext,
-  inferred: string[],
   budget: number,
 ): ChatMessage {
-  const body = q.why ? `${q.ask}\n_${q.why}_` : q.ask;
-  // The structured question owns the ask (and may have been replaced by a
-  // routing gate). Keep acknowledgement sentences, never a second model ask.
-  const acknowledgement = reply
-    .split(/(?<=[.!?])\s+|\n+/u)
-    .filter((sentence) => !sentence.includes("?"))
-    .join(" ")
-    .trim();
-  const content = acknowledgement ? `${acknowledgement}\n\n${body}` : body;
   const options = q.id === "studio" ? studioOptions(ctx) : questionOptions(q);
-  return assistantMessage(content, {
+  return assistantMessage(q.ask, {
     options,
     allowFreeText: q.allowFreeText ?? true,
     placeholder: q.placeholder,
     picker: q.picker,
     remaining: Math.max(0, budget - (s.agentAsked?.length ?? 0)),
-    ...(inferred.length ? { inferred } : {}),
   });
 }
 
@@ -801,9 +848,15 @@ export async function runAgentTurn(
     bindPendingTextAnswer(utterance, s);
     const before = { ...s.data };
     inferred.push(...inferFromText(utterance, s, ctx));
+    // Regex extraction is a GUESS, not the reporter's word. Marking it "user"
+    // made it human-locked: the model could not correct it, the Momence matcher
+    // could not replace it, and the controller suppressed any question about it
+    // because the slot looked answered. That is why a mis-parsed class list
+    // ("30AM", a room listed as a class) survived all the way to the ticket and
+    // no session picker was ever offered.
     for (const [key, value] of Object.entries(s.data)) {
       if (value !== undefined && value !== before[key as keyof typeof before]) {
-        markSlotSource(s, key === "trainerName" ? "trainerName" : key, "user");
+        markSlotSource(s, key === "trainerName" ? "trainerName" : key, "agent");
       }
     }
   }
@@ -1181,6 +1234,10 @@ export async function runAgentTurn(
     if (missing.includes("studio")) question = { ...question, id: "studio", allowFreeText: false };
   }
 
+  // Whether Momence can be asked "which classes, and who was in them" — that
+  // decides whether the blast radius is a question for the reporter at all.
+  const classSignal = hasClassSignal(narrative);
+
   // Owner-critical gates. Routing, live-vs-resolved and blast radius change
   // what the owner physically does, so they outrank the question budget: one
   // focused question each, never the same one twice, with concrete options.
@@ -1197,7 +1254,13 @@ export async function runAgentTurn(
       "Repair and Maintenance", "Tech Issues", "Operating Systems",
       "Safety and Security", "Class Experience",
     ].includes(s.data.category ?? "");
-    const relevantGates = operationalFault ? (["resolvedNow", "impact"] as const) : (["impact"] as const);
+    // Impact is deliberately NOT gated here when Momence can answer it: the
+    // roster of the affected sessions gives a real count, so asking the
+    // reporter to characterise the blast radius first is a worse question. It
+    // is applied further down, only if the pickers could not settle it.
+    const relevantGates = operationalFault
+      ? ((toolsEnabled && classSignal ? ["resolvedNow"] : ["resolvedNow", "impact"]) as readonly string[])
+      : ((toolsEnabled && classSignal ? [] : ["impact"]) as readonly string[]);
     for (const gate of relevantGates) {
       if (!missing.includes(gate) || (s.agentAsked ?? []).includes(gate)) continue;
       question = {
@@ -1215,6 +1278,45 @@ export async function runAgentTurn(
       };
       break;
     }
+  }
+
+  // When Momence can answer "which classes" and "who was in them", asking the
+  // reporter to confirm real rows beats parsing their prose. A regex reading of
+  // "BBB at 10, cycle at 10.30, FIT at 11" produces a string nobody can act on
+  // and no session ids; the timetable produces both. Only the reporter can say
+  // which of those rows the problem actually hit, so this is a pick, not a
+  // lookup — and for a multi-class incident it has to be a multi-pick.
+  const sessionsUnconfirmed = s.data.momenceSessionIds === undefined;
+  if (
+    !question &&
+    toolsEnabled &&
+    classSignal &&
+    sessionsUnconfirmed &&
+    !(s.agentAsked ?? []).includes("sessions")
+  ) {
+    question = {
+      id: "sessions",
+      ask: "Which classes did this hit? Tick every one from the timetable.",
+      why: "picking the real sessions attaches their rosters and bookings to the ticket",
+      picker: "sessions",
+      allowFreeText: true,
+      skipLabel: "Not class specific",
+    };
+  } else if (
+    !question &&
+    toolsEnabled &&
+    s.data.momenceSessionIds?.length &&
+    s.data.affectedMembers === undefined &&
+    !(s.agentAsked ?? []).includes("attendees")
+  ) {
+    question = {
+      id: "attendees",
+      ask: "Who was actually in those classes? Tick anyone affected.",
+      why: "these are the people the owner may need to credit or call",
+      picker: "attendees",
+      allowFreeText: true,
+      skipLabel: "Nobody specific",
+    };
   }
 
   // An INFERRED blast radius is a guess, and it moves severity, the SLA clock
@@ -1263,9 +1365,7 @@ export async function runAgentTurn(
     s.pendingQuestionId = question.id;
     s.agentAsked = [...(s.agentAsked ?? []), question.id];
     s.agentAskLog = [...(s.agentAskLog ?? []), { id: question.id, ask: question.ask }];
-    const message = questionMessage(question, turn.reply, s, ctx, inferred, budget);
-    if (first) message.analysis = analysisChips(s, turn.classification.confidence);
-    const messages = [message];
+    const messages = [questionMessage(question, s, ctx, budget)];
     return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 

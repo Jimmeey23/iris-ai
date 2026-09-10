@@ -43,6 +43,10 @@ export type IntakeData = {
   memberContact?: string;
   momenceMemberId?: number;
   momenceSessionId?: number;
+  /** Every Momence session the incident hit, when it spanned more than one. */
+  momenceSessionIds?: number[];
+  /** Members picked off the real rosters of those sessions. */
+  affectedMembers?: string;
   trainerName?: string;
   classInfo?: string;
   classAt?: string;
@@ -611,6 +615,10 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   }
   if (d.memberContact) details["Member contact"] = d.memberContact;
   if (d.momenceMemberId) details["Momence member ID"] = String(d.momenceMemberId);
+  if (d.momenceSessionIds?.length) {
+    details["Momence session IDs"] = d.momenceSessionIds.join(", ");
+  }
+  if (d.affectedMembers) details["Members affected"] = d.affectedMembers;
   if (d.frequency) details["Frequency"] = d.frequency;
   if (d.actionTaken) details["Action already taken"] = d.actionTaken;
   if (d.witnesses) details["Witnesses"] = d.witnesses;

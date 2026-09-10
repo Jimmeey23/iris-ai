@@ -863,9 +863,37 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
                 kind={activePicker}
                 studios={studios}
                 autoFocus={false}
+                sessionIds={
+                  Array.isArray(capture.momenceSessionIds)
+                    ? (capture.momenceSessionIds as number[])
+                    : typeof capture.momenceSessionId === "number"
+                      ? [capture.momenceSessionId]
+                      : []
+                }
                 onPick={(r) => {
                   setShowPicker(true);
                   void send({ value: r.value, label: r.label });
+                }}
+                onConfirm={(rs) => {
+                  setShowPicker(true);
+                  // One message carries the whole selection, so a multi-class
+                  // incident is confirmed in a single turn rather than one
+                  // question per class.
+                  const prefix = activePicker === "attendees" ? "members" : "sessions";
+                  if (!rs.length) {
+                    void send({
+                      value: `${prefix}:none`,
+                      label: activePicker === "attendees" ? "Nobody specific" : "Not class specific",
+                    });
+                    return;
+                  }
+                  const encoded = rs
+                    .map((r) => `${r.meta?.sessionId ?? r.meta?.memberId ?? ""}|${r.label}`)
+                    .join(";;");
+                  void send({
+                    value: `${prefix}:${encoded}`,
+                    label: rs.map((r) => r.label).join(", "),
+                  });
                 }}
               />
             </div>

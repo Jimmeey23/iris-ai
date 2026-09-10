@@ -25,7 +25,7 @@ export type AgentQuestion = {
   options?: { label: string; value: string }[];
   allowFreeText?: boolean;
   placeholder?: string;
-  picker?: "member" | "session" | "trainer" | "studio" | "membership";
+  picker?: "member" | "session" | "sessions" | "attendees" | "trainer" | "studio" | "membership";
   skipLabel?: string;
 };
 
@@ -151,7 +151,7 @@ const AGENT_RESPONSE_SCHEMA = {
             id: { type: "string" }, ask: { type: "string" }, why: { type: ["string", "null"] },
             options: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false, required: ["label", "value"], properties: { label: { type: "string" }, value: { type: "string" } } } },
             allowFreeText: { type: "boolean" }, placeholder: { type: ["string", "null"] },
-            picker: { anyOf: [{ type: "null" }, { type: "string", enum: ["member", "session", "trainer", "studio", "membership"] }] },
+            picker: { anyOf: [{ type: "null" }, { type: "string", enum: ["member", "session", "sessions", "attendees", "trainer", "studio", "membership"] }] },
             skipLabel: { type: ["string", "null"] },
           } },
         ],

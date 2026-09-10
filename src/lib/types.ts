@@ -90,7 +90,7 @@ export type ChatMessage = {
   options?: ChatOption[];
   allowFreeText?: boolean;
   placeholder?: string;
-  picker?: "member" | "session" | "trainer" | "studio" | "membership";
+  picker?: "member" | "session" | "sessions" | "attendees" | "trainer" | "studio" | "membership";
   remaining?: number;
   kind?: "text" | "draft" | "created" | "thinking";
   draft?: TicketDraft;
