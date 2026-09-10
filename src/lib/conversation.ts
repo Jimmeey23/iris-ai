@@ -16,10 +16,27 @@ function hash(s: string): number {
   return h;
 }
 
-export function timeGreeting(): string {
-  const h = Number(
-    new Date().toLocaleString("en-GB", { hour: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }),
-  );
+/** Hour 0-23 in IST. `hour12:false` yields "24" at midnight on some ICU builds. */
+export function istHour(now: Date = new Date()): number {
+  const part = new Intl.DateTimeFormat("en-GB", {
+    hour: "numeric",
+    hourCycle: "h23",
+    timeZone: "Asia/Kolkata",
+  })
+    .formatToParts(now)
+    .find((p) => p.type === "hour")?.value;
+  const h = Number(part);
+  return Number.isFinite(h) ? h % 24 : 12;
+}
+
+/**
+ * Time-appropriate opener. A studio manager messaging at 1 am is not having a
+ * morning, so the small hours get their own greeting rather than falling into
+ * the `h < 12` bucket.
+ */
+export function timeGreeting(now: Date = new Date()): string {
+  const h = istHour(now);
+  if (h < 5) return "You're up late";
   if (h < 12) return "Morning";
   if (h < 17) return "Afternoon";
   return "Evening";

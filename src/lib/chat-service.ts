@@ -167,6 +167,7 @@ export async function runChatTurn(
         trainerName: d.trainerName,
         classInfo: d.classInfo,
         membershipRef: d.membershipRef,
+        resolvedNow: d.resolvedNow,
       });
       state = { ...state, insight };
       messages = messages.map((m) => (m.kind === "draft" ? reviewMessage(state, ctx, insight) : m));

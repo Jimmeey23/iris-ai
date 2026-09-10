@@ -77,6 +77,22 @@ const SEVERITY_FACTOR: Record<Severity, number> = {
   Minor: 1.6,
 };
 
+/**
+ * Targets people can actually work to. A multiplier produces values like
+ * "7.25h respond / 14.5h resolve", which nobody schedules against and which
+ * makes the clock look computed rather than agreed — so the scaled value is
+ * snapped down to the nearest real commitment.
+ */
+const RESPOND_TIERS = [0.25, 0.5, 1, 2, 4, 8, 12, 24];
+const RESOLVE_TIERS = [1, 2, 4, 8, 12, 24, 48, 72, 96, 168];
+
+function snap(hours: number, tiers: number[]): number {
+  // Round DOWN to a tier so a compressed clock is never quietly loosened;
+  // anything under the smallest tier keeps that tier as its floor.
+  const eligible = tiers.filter((t) => t <= hours + 1e-9);
+  return eligible.length ? eligible[eligible.length - 1] : tiers[0];
+}
+
 export type SlaOverrides = Record<string, { respond?: number; resolve?: number }>;
 
 export function basePolicy(category: string, subcategory: string, overrides?: SlaOverrides): SlaPolicy {
@@ -117,6 +133,8 @@ export function computeSla(input: {
   sentiment: string;
   impact?: string;
   atRisk?: boolean;
+  /** True when confirmed fixed, false when confirmed still happening, undefined when unknown. */
+  resolvedNow?: boolean;
   overrides?: SlaOverrides;
 }): SlaResult {
   const policy = basePolicy(input.category, input.subcategory, input.overrides);
@@ -149,18 +167,30 @@ export function computeSla(input: {
     sevIndex = Math.max(sevIndex, 2);
     reasons.push("escalated tone");
   }
+  // A fault the reporter has confirmed is STILL HAPPENING is live work. Writing
+  // it up on the same clock as a fault already fixed is the single most
+  // misleading thing this function can do.
+  if (input.resolvedNow === false) {
+    sevIndex = Math.max(sevIndex, 2);
+    reasons.push("still unresolved at time of report");
+  }
 
   const severity = SEVERITIES[Math.max(0, Math.min(3, sevIndex))];
   const factor = SEVERITY_FACTOR[severity];
-  const round = (h: number) => Math.max(0.25, Math.round(h * factor * 4) / 4);
+
+  let respondHours = snap(policy.respond * factor, RESPOND_TIERS);
+  const resolveHours = snap(policy.resolve * factor, RESOLVE_TIERS);
+  // Nobody waits hours to acknowledge something that is happening right now.
+  if (input.resolvedNow === false) respondHours = Math.min(respondHours, 1);
+  if (input.atRisk || input.impact === "safety") respondHours = Math.min(respondHours, 0.25);
 
   return {
-    respondHours: round(policy.respond),
-    resolveHours: round(policy.resolve),
+    respondHours,
+    resolveHours: Math.max(resolveHours, respondHours),
     policyLabel: policy.label,
     severity,
     priority: SEVERITY_TO_PRIORITY[severity],
-    reason: `${reasons.join(" · ")} → ${severity} severity, ${round(policy.resolve)}h resolve target`,
+    reason: `${reasons.join(" · ")} → ${severity} severity, ${resolveHours}h resolve target`,
   };
 }
 

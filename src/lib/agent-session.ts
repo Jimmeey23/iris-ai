@@ -27,6 +27,23 @@ import { istDate, resolveWhenToDate, rowDateToIso } from "./time";
 import { momenceAvailable, runTools, type ToolResult } from "./agent-tools";
 import type { ChatMessage, ChatOption } from "./types";
 
+/**
+ * A message that is nothing but a greeting or a nudge. The model is told to
+ * flag these itself, but a slip lets "hi" into the durable narrative — and from
+ * there into the ticket title, which is how a ticket ends up called
+ * "Hi HI, there was no electricity…". So the check is also made here, in code.
+ */
+const GREETING_ONLY =
+  /^(?:h(?:i+|ey+|ello+)|yo+|hola|namaste|good\s+(?:morning|afternoon|evening|day)|morning|afternoon|evening|sup|hi there|hey there|are you (?:there|up)|you there|iris)[\s,.!?:;—–-]*$/i;
+
+export function isGreetingOnly(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 40) return false;
+  // Strip a trailing "iris"/"team" address so "hi iris" counts too.
+  const stripped = t.replace(/[\s,]+(?:iris|team|there)[\s,.!?]*$/i, "").trim();
+  return GREETING_ONLY.test(t) || GREETING_ONLY.test(stripped);
+}
+
 /** Steps owned by the deterministic review / edit machinery, not the agent. */
 const DETERMINISTIC_STEPS = new Set(["review", "edit_menu", "created"]);
 const DETERMINISTIC_VALUES = new Set(["approve", "edit", "restart", "new", "undo"]);
@@ -490,7 +507,17 @@ function applyTurnFacts(turn: { slots: Record<string, { value: string | boolean 
   const uncorrectedSlots = Object.fromEntries(
     Object.entries(turn.slots).filter(([slot]) => !corrected.has(slot === "trainer" ? "trainerName" : slot)),
   );
+  const before: Record<string, unknown> = { ...s.data };
   applySlots(uncorrectedSlots, s, ctx, false);
+  // Record that these values are the model's reading, not the reporter's word.
+  // Without this every slot looks equally authoritative, and a downstream check
+  // cannot tell an inference it should confirm from a fact it should trust.
+  for (const [key, value] of Object.entries(s.data)) {
+    if (value === undefined || value === before[key]) continue;
+    const mapped = key === "trainerName" ? "trainerName" : key;
+    if (slotSource(s, mapped) === "user" || slotSource(s, mapped) === "context") continue;
+    markSlotSource(s, mapped, "agent");
+  }
 }
 
 /**
@@ -894,6 +921,13 @@ export async function runAgentTurn(
     };
   }
 
+  // The model is asked to flag a greeting itself, but it is not the authority on
+  // this: a bare "hi" is deterministically not a report, whatever it returned.
+  // Only override when nothing substantive has been said yet — a later "hi,
+  // there was no electricity…" is a real report that happens to open politely.
+  const greetingTurn = Boolean(utterance) && isGreetingOnly(utterance) && !s.data.rawText?.trim();
+  if (greetingTurn) result.turn.reportEstablished = false;
+
   // Keep the durable report narrative free of greeting-only turns, while still
   // retaining every substantive follow-up that may matter to the final draft.
   if (result.turn.reportEstablished !== false && utterance) {
@@ -1116,6 +1150,31 @@ export async function runAgentTurn(
     }
   }
 
+  // An INFERRED blast radius is a guess, and it moves severity, the SLA clock
+  // and who gets paged. The gates above only fire when a slot is missing, so a
+  // model that confidently wrote impact="many" from a report about one attendee
+  // silently satisfies the gate that exists to catch exactly that. When the
+  // guess is one of the two that escalate, confirm it once.
+  if (
+    !question &&
+    (s.data.impact === "many" || s.data.impact === "safety") &&
+    slotSource(s, "impact") === "agent" &&
+    !(s.agentAsked ?? []).includes("impact")
+  ) {
+    question = {
+      id: "impact",
+      ask: `I've read this as ${IMPACT_LABEL[s.data.impact] ?? s.data.impact} — how many members were actually affected?`,
+      why: "it sets the severity and the SLA clock, so I'd rather have your number than my guess",
+      allowFreeText: true,
+      placeholder: "e.g. 1 client in cycle, 6 in FIT",
+      options: [
+        { label: "Safety risk / classes blocked", value: "ans:impact|Safety risk / classes blocked" },
+        { label: "Several members affected", value: "ans:impact|Several members affected" },
+        { label: "One member / minor disruption", value: "ans:impact|One member / minor disruption" },
+      ],
+    };
+  }
+
   // Never ask the same thing twice. If the answer did not land the first time,
   // asking again just loops the reporter — take what we have and draft.
   if (question && (s.agentAsked ?? []).includes(question.id)) {
@@ -1136,6 +1195,7 @@ export async function runAgentTurn(
     s.step = "agent_q";
     s.pendingQuestionId = question.id;
     s.agentAsked = [...(s.agentAsked ?? []), question.id];
+    s.agentAskLog = [...(s.agentAskLog ?? []), { id: question.id, ask: question.ask }];
     const message = questionMessage(question, turn.reply, s, ctx, inferred, budget);
     if (first) message.analysis = analysisChips(s, turn.classification.confidence);
     const messages = [message];
@@ -1154,6 +1214,35 @@ export async function runAgentTurn(
   // Unknown stays unknown. The draft may state that follow-up is required, but
   // must never turn a skipped or unclear reply into a confirmed fact.
 
+  // Asking a question and then filing the ticket as though it never happened is
+  // how the reporter's answer gets lost. Anything asked whose slot is still
+  // empty — plus a question still pending as we draft — goes onto the ticket as
+  // an open item, so the owner knows to chase it rather than assuming it's
+  // covered.
+  // A custom question has no slot to check, so the only evidence is whether the
+  // reporter engaged with it: a skip, a "don't know", or "just raise it" leaves
+  // it open, while any substantive reply is taken as the answer.
+  const declined =
+    !utterance ||
+    wantsDraftNow ||
+    /^(skip|pass|don'?t know|dunno|no idea|not sure|unknown|n\/a|not applicable)[.!]?$/i.test(
+      utterance.trim(),
+    );
+  const unanswered = (s.agentAskLog ?? [])
+    .filter((entry) =>
+      entry.id.startsWith("custom:")
+        ? declined && s.pendingQuestionId === entry.id
+        : knownQuestionSlots[entry.id] === undefined,
+    )
+    .map((entry) => entry.ask.trim())
+    .filter(Boolean);
+  if (unanswered.length) {
+    s.data.extraDetails = {
+      ...(s.data.extraDetails ?? {}),
+      "Still to confirm": [...new Set(unanswered)].join(" · "),
+    };
+  }
+
   hooks.onStatus?.("Building the draft");
   const insight = await insightFromAgent({
     agent: turn.insight,
@@ -1162,9 +1251,11 @@ export async function runAgentTurn(
     subcategory: s.data.subcategory ?? "",
     impact: s.data.impact,
     atRisk: s.data.atRisk,
+    resolvedNow: s.data.resolvedNow,
     studioName: s.data.studioName,
     memberName: s.data.memberName,
     trainerName: s.data.trainerName,
+    classInfo: s.data.classInfo,
     model: result.model,
     confidence: turn.classification.confidence,
   });

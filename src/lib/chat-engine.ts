@@ -94,6 +94,12 @@ export type IntakeState = {
   asked?: string[];
   /** Question ids the LLM agent has already put to this reporter. */
   agentAsked?: string[];
+  /**
+   * Every question actually put to the reporter, in words. Asking is a promise
+   * that the answer matters — so an unanswered one is surfaced on the ticket
+   * rather than forgotten when the draft is built.
+   */
+  agentAskLog?: { id: string; ask: string }[];
   pendingQuestionId?: string | null;
   /** Whether the studio-scoped session lookup has already been run this session. */
   autoLookupDone?: boolean;
@@ -165,6 +171,7 @@ export function emptyState(): IntakeState {
     planIndex: 0,
     asked: [],
     agentAsked: [],
+    agentAskLog: [],
     pendingQuestionId: null,
     slotSources: {},
   };
@@ -560,9 +567,11 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
       subcategory,
       impact: d.impact,
       atRisk: d.atRisk,
+      resolvedNow: d.resolvedNow,
       studioName: studioLabel,
       memberName: d.memberName,
       trainerName: d.trainerName,
+      classInfo: d.classInfo,
     });
 
   const priority = d.priorityOverride ?? ai.priority;
@@ -1125,9 +1134,11 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
         subcategory: best.subcategory,
         impact: s.data.impact,
         atRisk: s.data.atRisk,
+        resolvedNow: s.data.resolvedNow,
         studioName: s.data.studioName,
         memberName: s.data.memberName,
         trainerName: s.data.trainerName,
+        classInfo: s.data.classInfo,
       });
       const reaction = reactTo(text, preview.sentiment, best.category);
       const analysis = [

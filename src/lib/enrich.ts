@@ -56,22 +56,72 @@ const CHURN_SIGNALS =
 const EFFORT_HIGH =
   /(replace|install|renovat|vendor|structural|contractor|new system|migrat|overhaul|policy change)/i;
 const EFFORT_LOW = /(remind|inform|clean|restock|reset|adjust|refill|move|tell|note)/i;
+/** Anything that needs someone outside the studio team to act. */
+const THIRD_PARTY =
+  /(electric|power ?(?:cut|outage|failure)|no electricity|grid|bescom|bses|adani|tata power|mseb|generator|\bdg\b|building management|landlord|society|bmc|vendor|technician|amc|plumber|electrician|isp|broadband|internet provider)/i;
 
-function toTitle(text: string, fallback: string): string {
-  const clean = text
-    .replace(/\s+/g, " ")
-    .replace(
-      /^(?:a\s+|the\s+)?(?:member|client|guest|customer|she|he|they|someone)?\s*(?:has\s+)?(?:just\s+)?(?:complained|reported|mentioned|said|says|told me|flagged|raised|informed|noticed)\s*(?:that\s+|about\s+)?/i,
-      "",
-    )
-    .trim();
-  if (!clean) return fallback;
-  const sentence = clean.split(/(?<=[.!?])\s/)[0] ?? clean;
-  const capped =
-    sentence.length > 90
-      ? `${sentence.slice(0, 90).split(" ").slice(0, -1).join(" ").replace(/[,;:.]$/, "")}…`
-      : sentence.replace(/\.$/, "");
-  return capped.charAt(0).toUpperCase() + capped.slice(1);
+/** Openers that carry no ticket meaning — a chat "hi" must never reach a title. */
+const GREETING_PREFIX =
+  /^(?:h(?:i+|ey+|ello)|yo|hola|namaste|good\s+(?:morning|afternoon|evening|day)|morning|afternoon|evening|team|guys|folks)\b[\s,.!:;—–-]*/i;
+const REPORT_PREAMBLE =
+  /^(?:a\s+|the\s+)?(?:member|client|guest|customer|she|he|they|someone)?\s*(?:has\s+)?(?:just\s+)?(?:complained|reported|mentioned|said|says|told me|flagged|raised|informed|noticed|wanted to (?:flag|report))\s*(?:that\s+|about\s+)?/i;
+
+/** Strip greetings and reporting preamble, however many are stacked up front. */
+function stripPreamble(text: string): string {
+  let out = text.replace(/\s+/g, " ").trim();
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(GREETING_PREFIX, "").replace(REPORT_PREAMBLE, "").trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** Clock times ("10 am", "10.30am", "6:15 pm") — used to size the blast radius. */
+const CLOCK_TIME = /\b\d{1,2}[.:]?\d{0,2}\s*(?:am|pm)\b/gi;
+
+function countDistinctTimes(text: string): number {
+  const seen = new Set(
+    (text.match(CLOCK_TIME) ?? []).map((t) => t.toLowerCase().replace(/[\s.:]/g, "")),
+  );
+  return seen.size;
+}
+
+/**
+ * A ticket title is a label, not a transcript slice. A short, single-clause
+ * report can speak for itself; anything longer gets a structured title built
+ * from what the ticket actually is, so an owner scanning a queue can read it.
+ */
+function composeTitle(input: {
+  text: string;
+  subcategory: string;
+  studioName?: string;
+  classInfo?: string;
+  resolvedNow?: boolean;
+}): string {
+  const clean = stripPreamble(input.text ?? "");
+  const place =
+    input.studioName && input.studioName !== "Not studio specific"
+      ? ` — ${input.studioName.split(",")[0].trim()}`
+      : "";
+
+  const firstSentence = (clean.split(/(?<=[.!?])\s/)[0] ?? clean).replace(/[.\s]+$/, "");
+  const words = firstSentence ? firstSentence.split(/\s+/) : [];
+  const singleClause = !/[,;]|\s[-–—]\s/.test(firstSentence);
+
+  // The reporter's own words win only when they already read as a headline.
+  if (words.length >= 4 && words.length <= 14 && singleClause) {
+    return firstSentence.charAt(0).toUpperCase() + firstSentence.slice(1);
+  }
+
+  const scope: string[] = [];
+  const classes = input.classInfo ? countDistinctTimes(input.classInfo) : 0;
+  const times = classes || countDistinctTimes(clean);
+  if (times >= 2) scope.push(`${times} classes affected`);
+  if (input.resolvedNow === false) scope.push("still unresolved");
+
+  const label = `${input.subcategory}${place}`;
+  return scope.length ? `${label} (${scope.join(", ")})` : label;
 }
 
 /** Deterministic on-device enrichment — always available, no API key required. */
@@ -84,6 +134,8 @@ export function localEnrich(input: {
   studioName?: string;
   memberName?: string;
   trainerName?: string;
+  classInfo?: string;
+  resolvedNow?: boolean;
   slaOverrides?: SlaOverrides;
 }): AiInsight {
   const text = input.text || `${input.subcategory} at ${input.studioName ?? "studio"}`;
@@ -103,6 +155,10 @@ export function localEnrich(input: {
   if (sentiment === "Escalated") urgencyScore = Math.min(99, urgencyScore + 8);
   if (input.impact === "many") urgencyScore = Math.min(99, urgencyScore + 5);
   if (input.impact === "suggestion") urgencyScore = Math.max(10, urgencyScore - 12);
+  // A fault the reporter has confirmed is STILL happening is live work, not a
+  // write-up. Confirmed-resolved earns the opposite nudge.
+  if (input.resolvedNow === false) urgencyScore = Math.min(99, urgencyScore + 6);
+  else if (input.resolvedNow === true) urgencyScore = Math.max(10, urgencyScore - 8);
 
   const churnRisk: AiInsight["churnRisk"] = CHURN_SIGNALS.test(text)
     ? "High"
@@ -110,13 +166,18 @@ export function localEnrich(input: {
       ? "Medium"
       : "Low";
 
+  // EFFORT_LOW matches words like "move" and "provided", which a floor
+  // workaround always contains — so a workaround must never be mistaken for the
+  // fix. An unresolved fault, or one that needs a third party, is not Low.
   const effort: AiInsight["effort"] = EFFORT_HIGH.test(text)
     ? "High"
-    : EFFORT_LOW.test(text)
-      ? "Low"
-      : "Medium";
+    : input.resolvedNow === false || THIRD_PARTY.test(text)
+      ? "Medium"
+      : EFFORT_LOW.test(text)
+        ? "Low"
+        : "Medium";
 
-  const rootCause = deriveRootCause(input.category, input.subcategory);
+  const rootCause = deriveRootCause(input.category, input.subcategory, text);
   const suggestedAction = deriveAction(input.category, input.subcategory, input.memberName);
 
   const subject = [
@@ -136,6 +197,7 @@ export function localEnrich(input: {
     sentiment,
     impact: input.impact,
     atRisk: input.atRisk,
+    resolvedNow: input.resolvedNow,
     overrides: input.slaOverrides,
   });
 
@@ -145,7 +207,13 @@ export function localEnrich(input: {
     slaResolveHours: sla.resolveHours,
     slaPolicy: sla.policyLabel,
     slaReason: sla.reason,
-    title: toTitle(input.text, `${input.subcategory} — ${input.studioName ?? "Studio"}`),
+    title: composeTitle({
+      text: input.text,
+      subcategory: input.subcategory,
+      studioName: input.studioName,
+      classInfo: input.classInfo,
+      resolvedNow: input.resolvedNow,
+    }),
     summary: `${subject}.${who}${trainer} Tone reads ${sentiment.toLowerCase()} (${emotion.toLowerCase()}); ${priority.toLowerCase()} priority with ${effort.toLowerCase()} expected effort.`,
     sentiment,
     emotion,
@@ -165,7 +233,31 @@ export function localEnrich(input: {
   };
 }
 
-function deriveRootCause(category: string, subcategory: string): string {
+/**
+ * Narrative-driven root causes. These beat the category default because the
+ * category default is a guess about the class of problem, while these read the
+ * actual fault the reporter described. Order matters — first match wins.
+ */
+const ROOT_CAUSE_SIGNALS: { test: RegExp; cause: string }[] = [
+  {
+    // A partial outage (one room still live) is a distribution or phase fault
+    // inside the premises, not a supply failure — very different owner.
+    test: /(power|electric|electricity|outage|no light)/i,
+    cause:
+      "Loss of electrical supply to the studio. Confirm whether it was a building/grid-side outage or an internal distribution fault — if any room kept power, suspect a circuit, phase or DB fault on our side rather than the supply.",
+  },
+  { test: /(water (?:leak|seep)|leak|drip|overflow|blocked drain|no water)/i, cause: "Plumbing or drainage fault — locate the source before cosmetic repair." },
+  { test: /(not cooling|no ac|ac (?:not|isn'?t) work|hvac|compressor|gas (?:leak|refill))/i, cause: "HVAC unit underperforming — likely refrigerant, filter or servicing overdue on that unit." },
+  { test: /(wifi|internet|broadband|network (?:down|drop))/i, cause: "Connectivity fault — isolate router, ISP link and the device before escalating." },
+  { test: /(mic|speaker|audio|sound system|music (?:not|stopped|cut))/i, cause: "AV chain fault — trace mic, receiver, mixer and speaker in turn." },
+  { test: /(momence|booking system|pos|payment gateway|app (?:crash|down)|not syncing)/i, cause: "Platform fault or sync failure — reproduce, capture the error and raise with the vendor." },
+  { test: /(double charge|charged twice|incorrect charge|auto.?debit|refund)/i, cause: "Billing configuration or policy-communication mismatch between what was sold and what the system charged." },
+  { test: /(injur|slip|fell|fainted|bled|sprain)/i, cause: "Member injured during activity — establish whether cause was equipment, surface, instruction or a pre-existing condition." },
+];
+
+function deriveRootCause(category: string, subcategory: string, text = ""): string {
+  const signal = ROOT_CAUSE_SIGNALS.find((r) => r.test.test(text));
+  if (signal) return `${subcategory}: ${signal.cause}`;
   const map: Record<string, string> = {
     "Repair and Maintenance": "Likely deferred preventive maintenance or an unlogged asset fault.",
     "Studio Amenities and Facilities": "Housekeeping cadence or consumable stock levels not matching footfall.",
@@ -243,6 +335,7 @@ export async function aiEnrich(input: {
   trainerName?: string;
   classInfo?: string;
   membershipRef?: string;
+  resolvedNow?: boolean;
 }): Promise<AiInsight> {
   const slaOverrides = await getSlaOverrides();
   const base = localEnrich({ ...input, slaOverrides });
@@ -260,6 +353,8 @@ Pre-classified subcategory: ${input.subcategory}
 Studio: ${input.studioName ?? "unknown"}
 Member: ${input.memberName ?? "n/a"} | Trainer: ${input.trainerName ?? "n/a"} | Class: ${input.classInfo ?? "n/a"} | Membership: ${input.membershipRef ?? "n/a"}
 Stated impact: ${input.impact ?? "unknown"} | Immediate risk flagged: ${input.atRisk ? "yes" : "no"}
+Current state: ${input.resolvedNow === true ? "reporter confirms it is RESOLVED" : input.resolvedNow === false ? "reporter confirms it is STILL HAPPENING — this is live work" : "unknown"}
+Root cause must describe the fault actually narrated above, never a generic statement about the category. A workaround put in place on the floor is not the fix — do not score effort as Low because of it.
 
 Valid categories: ${CATEGORIES.join(" | ")}
 Valid subcategories for ${input.category}: ${allowed.join(" | ")}
@@ -325,6 +420,7 @@ Return JSON with exactly these keys:
       sentiment: mergedSentiment,
       impact: input.impact,
       atRisk: input.atRisk,
+      resolvedNow: input.resolvedNow,
       overrides: slaOverrides,
     });
 
@@ -399,6 +495,8 @@ export async function insightFromAgent(input: {
   studioName?: string;
   memberName?: string;
   trainerName?: string;
+  classInfo?: string;
+  resolvedNow?: boolean;
   model?: string;
   confidence?: number;
 }): Promise<AiInsight> {
@@ -431,6 +529,7 @@ export async function insightFromAgent(input: {
     sentiment,
     impact: input.impact,
     atRisk: input.atRisk,
+    resolvedNow: input.resolvedNow,
     overrides: slaOverrides,
   });
 
