@@ -1,150 +1,174 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { runAgentTurn } from "./agent-session";
+import { applyOptionAnswer, runAgentTurn } from "./agent-session";
 import { runAgent, type AgentTurn } from "./agent";
 import { emptyState, markSlotSource } from "./chat-engine";
+import { questionBudget } from "./guardrails";
+import { momenceAvailable, runTools } from "./agent-tools";
 
-vi.mock("./agent", async (original) => ({
-  ...await original<typeof import("./agent")>(),
-  runAgent: vi.fn(),
-}));
+vi.mock("./agent", async (original) => ({ ...await original<typeof import("./agent")>(), runAgent: vi.fn() }));
 vi.mock("./recurrence", () => ({ findRelatedTickets: vi.fn(async () => []) }));
 vi.mock("./memory", () => ({ findContextFacts: vi.fn(async () => []) }));
 vi.mock("./agent-tools", () => ({ momenceAvailable: vi.fn(async () => false), runTools: vi.fn(async () => []) }));
 vi.mock("./guardrails", async (original) => ({
-  ...await original<typeof import("./guardrails")>(),
-  questionBudget: vi.fn(async () => 5),
+  ...await original<typeof import("./guardrails")>(), questionBudget: vi.fn(async () => 6),
 }));
 
-import { questionBudget } from "./guardrails";
-import { applyOptionAnswer } from "./agent-session";
-
-// Characterization tests: these PASS when the audited defects are present.
-// Replace with desired-behavior assertions as each finding is remediated.
-const ctx = { studios: [], reporter: { name: "Jimmeey", role: "Operations" } };
+const studios = [
+  { id: 1, name: "Kwality House, Kemps Corner", code: "KC", city: "Mumbai", isHq: false },
+  { id: 2, name: "Supreme HQ, Bandra", code: "BAN", city: "Mumbai", isHq: false },
+];
+const ctx = { studios, reporter: { name: "Jimmeey", role: "Operations" } };
 function state() {
   const s = emptyState();
-  s.data = {
-    rawText: "A member reported an outage. The cooler was provided.",
-    studioName: "Kemps Corner", studioId: null,
-    impact: "many", resolvedNow: true,
-    actionTaken: "Provided a cooler", occurredAt: "Yesterday", frequency: "First time",
-  };
+  s.data = { rawText: "A member reported an outage. The cooler was provided.", studioName: "Kemps Corner", studioId: 1,
+    impact: "many", resolvedNow: true, actionTaken: "Provided a cooler", occurredAt: "Yesterday", frequency: "First time" };
   return s;
 }
 function model(patch: Partial<AgentTurn> = {}) {
   const turn: AgentTurn = {
     reportEstablished: true, reply: "Got it, Jimmeey.",
     classification: { category: "Repair and Maintenance", subcategory: "Power Outage / Utility Failure", confidence: 0.9, alternates: [] },
-    slots: {}, secondaryIssues: [], nextQuestion: null, readyForDraft: true, ...patch,
+    slots: {}, secondaryIssues: [], nextQuestion: null, readyForDraft: true,
+    insight: { title: "Power outage disrupted three Kemps Corner classes", summary: "Power was unavailable for an hour and affected three classes.",
+      rootCause: "Studio utility power was unavailable.", suggestedAction: "Confirm restoration and inspect the supply.", sentiment: "Negative",
+      emotion: "frustrated", urgencyScore: 70, churnRisk: "Medium", effort: "Medium", priority: "High",
+      priorityReason: "Multiple classes were affected", tags: ["power-outage"] }, ...patch,
   };
   vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn });
 }
 beforeEach(() => {
   vi.mocked(runAgent).mockReset();
   vi.mocked(questionBudget).mockResolvedValue(6);
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runTools).mockResolvedValue([]);
 });
 
-it("AUDIT: ready-to-draft report is forced into an unrelated witness question", async () => {
+it("shows a complete report without forcing unrelated questions", async () => {
   model();
   const out = await runAgentTurn(state(), [], { text: "That is the full report." }, ctx);
-  expect(out.state.step).toBe("agent_q");
-  expect(out.state.pendingQuestionId).toBe("witnesses");
+  expect(out.state.step).toBe("review");
+  expect(out.state.pendingQuestionId).toBeNull();
 });
 
-it("AUDIT: the ladder exceeds an exhausted configured question budget", async () => {
-  model();
-  vi.mocked(questionBudget).mockResolvedValue(1);
-  const s = state();
-  s.agentAsked = ["resolvedNow"];
+it("does not add a fixed question to satisfy a configured count", async () => {
+  model(); vi.mocked(questionBudget).mockResolvedValue(1);
+  const s = state(); s.agentAsked = ["resolvedNow"];
   const out = await runAgentTurn(s, [], { text: "Yes, everything is restored." }, ctx);
-  expect(out.state.agentAsked).toHaveLength(2);
-  expect(out.state.pendingQuestionId).toBe("witnesses");
+  expect(out.state.step).toBe("review");
+  expect(out.state.agentAsked).toEqual(["resolvedNow"]);
 });
 
-it("AUDIT: known answered slots are not filtered from a new model question", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "actionTaken", ask: "What have you tried?" } });
+it("rejects a model question whose answer is already captured", async () => {
+  model({ readyForDraft: false, insight: undefined, nextQuestion: { id: "actionTaken", ask: "What have you tried?" } });
   const out = await runAgentTurn(state(), [], { text: "The cooler was already provided." }, ctx);
   expect(out.state.data.actionTaken).toBe("Provided a cooler");
-  expect(out.state.pendingQuestionId).toBe("actionTaken");
+  expect(out.state.pendingQuestionId).toBeNull();
+  expect(out.state.step).toBe("review");
 });
 
-it("AUDIT: plain-text answer is not bound to pending actionTaken if the model omits the slot", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
-  const s = state();
-  delete s.data.actionTaken;
-  s.pendingQuestionId = "actionTaken";
-  s.agentAsked = ["actionTaken"];
+it("binds a plain-text reply to its pending field before model planning", async () => {
+  model({ readyForDraft: false, insight: undefined, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
+  const s = state(); delete s.data.actionTaken; s.pendingQuestionId = "actionTaken"; s.agentAsked = ["actionTaken"];
   const out = await runAgentTurn(s, [], { text: "We provided a portable cooler." }, ctx);
-  expect(out.state.data.actionTaken).toBeUndefined();
-  expect(out.state.data.rawText).not.toContain("We provided a portable cooler.");
+  expect(out.state.data.actionTaken).toBe("We provided a portable cooler.");
+  expect(out.state.data.rawText).toContain("We provided a portable cooler.");
 });
 
-it("AUDIT: canonical actionTaken button silently fails to store its answer", () => {
-  const s = state();
-  delete s.data.actionTaken;
+it("stores canonical option answers", () => {
+  const s = state(); delete s.data.actionTaken;
   applyOptionAnswer("ans:Provided a portable cooler", s, "actionTaken");
-  expect(s.data.actionTaken).toBeUndefined();
+  expect(s.data.actionTaken).toBe("Provided a portable cooler");
   expect(s.slotSources?.actionTaken).toBe("user");
 });
 
-it("AUDIT: no-more-questions request does not suppress the model's optional question", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
-  const out = await runAgentTurn(state(), [], { text: "No more questions, draft it now." }, ctx);
-  expect(out.state.pendingQuestionId).toBe("witnesses");
+it("honours a request to stop asking and show the draft", async () => {
+  model({ readyForDraft: false, insight: undefined, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
+  const out = await runAgentTurn(state(), [], { text: "No more questions, show me the draft." }, ctx);
+  expect(out.state.step).toBe("review");
+  expect(out.state.pendingQuestionId).toBeNull();
 });
 
-it("AUDIT: skipped unknown resolution becomes a factual false value in a draft", async () => {
-  model();
-  const s = state();
-  delete s.data.resolvedNow;
-  s.agentAsked = ["studio", "resolvedNow", "impact", "witnesses"];
+it("keeps a skipped resolution unknown", async () => {
+  model(); const s = state(); delete s.data.resolvedNow; s.agentAsked = ["studio", "resolvedNow", "impact"];
   const out = await runAgentTurn(s, [], { value: "skip" }, ctx);
   expect(out.state.step).toBe("review");
-  expect(out.state.data.resolvedNow).toBe(false);
+  expect(out.state.data.resolvedNow).toBeUndefined();
 });
 
-it("AUDIT: correction in review is appended to notes without updating the studio", async () => {
-  const s = state();
-  s.step = "review";
+it("interprets a correction entered from draft review", async () => {
+  model({ corrections: [{ slot: "studio", value: "Bandra", quote: "this was Bandra" }], slots: { studio: { value: "Kemps Corner" } } });
+  const s = state(); s.step = "review"; s.data.momenceSessionId = 123;
   const out = await runAgentTurn(s, [], { text: "Correction: this was Bandra, not Kemps Corner." }, ctx);
-  expect(out.usedAgent).toBe(false);
-  expect(out.state.data.studioName).toBe("Kemps Corner");
-  expect(out.state.data.notes).toContain("Bandra");
-  expect(runAgent).not.toHaveBeenCalled();
+  expect(out.usedAgent).toBe(true);
+  expect(out.state.data.studioName).toContain("Bandra");
+  expect(out.state.data.notes).toBeUndefined();
+  expect(out.state.data.momenceSessionId).toBeUndefined();
 });
 
-it("AUDIT: trainer correction is overwritten by a stale slot in the same response", async () => {
-  model({
-    corrections: [{ slot: "trainer", value: "KV" }],
-    slots: { trainer: { value: "Old instructor" } },
-    readyForDraft: false, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" },
-  });
+it("keeps an explicit trainer correction over a stale slot", async () => {
+  model({ corrections: [{ slot: "trainer", value: "KV" }], slots: { trainer: { value: "Old instructor" } },
+    readyForDraft: false, insight: undefined, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
   const out = await runAgentTurn(state(), [], { text: "It was KV, not the old instructor." }, ctx);
-  expect(out.state.data.trainerName).toBe("Old instructor");
-  expect(out.state.slotSources?.trainer).toBe("user");
+  expect(out.state.data.trainerName).toBe("KV");
+  expect(out.state.slotSources?.trainerName).toBe("user");
 });
 
-it("AUDIT: persistent composer context restores an old studio after a correction", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
-  const s = state();
-  s.data.studioName = "Bandra";
-  markSlotSource(s, "studio", "user");
+it("does not restore an old composer studio after correction", async () => {
+  model({ readyForDraft: false, insight: undefined, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
+  const s = state(); s.data.studioName = "Bandra"; markSlotSource(s, "studio", "user");
   const out = await runAgentTurn(s, [], { text: "Yes.", context: { studioName: "Kemps Corner", studioId: 1 } }, ctx);
-  expect(out.state.data.studioName).toBe("Kemps Corner");
+  expect(out.state.data.studioName).toBe("Bandra");
 });
 
-it("AUDIT: a paraphrased duplicate gets through when it uses a different question ID", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "custom:current_status", ask: "Is the issue still ongoing?" } });
-  const s = state();
-  s.agentAsked = ["resolvedNow"];
+it("rejects a paraphrased resolution question after resolution is known", async () => {
+  model({ readyForDraft: false, insight: undefined, nextQuestion: { id: "custom:current_status", ask: "Is the issue still ongoing?" } });
+  const s = state(); s.agentAsked = ["resolvedNow"];
   const out = await runAgentTurn(s, [], { text: "I already said it is fixed." }, ctx);
-  expect(out.state.pendingQuestionId).toBe("custom:current_status");
+  expect(out.state.pendingQuestionId).toBeNull();
+  expect(out.state.step).toBe("review");
 });
 
-it("AUDIT: nulling a repeated question drafts even when the model says not ready", async () => {
-  model({ readyForDraft: false, nextQuestion: { id: "witnesses", ask: "Who witnessed it?" } });
-  const s = state();
-  s.agentAsked = ["studio", "resolvedNow", "impact", "witnesses"];
-  const out = await runAgentTurn(s, [], { text: "I do not know." }, ctx);
+it("auto-matches outage context from the first message", async () => {
+  model({ readyForDraft: false, insight: undefined, slots: {}, nextQuestion: { id: "resolvedNow", ask: "Was power restored?" } });
+  const report = "No electricity at Kemps Corner for an hour. BBB was at 10am, Cycle at 10.30am and FIT at 11am. We moved BBB and provided a portable cooler.";
+  const out = await runAgentTurn(emptyState(), [], { text: report }, ctx);
+  expect(out.state.data.studioName).toContain("Kemps Corner");
+  expect(out.state.data.occurredAt).toBe("Earlier today");
+  expect(out.state.data.classInfo).toContain("10AM");
+  expect(out.state.data.classInfo).toContain("Power Cycle");
+  expect(out.state.data.actionTaken).toBe(report);
+  expect(out.state.data.rawText).toContain(report);
+  expect(out.state.pendingQuestionId).toBe("resolvedNow");
+});
+
+it("auto-matches a later resolution reply before showing the draft", async () => {
+  model(); const s = state(); delete s.data.resolvedNow; s.pendingQuestionId = "resolvedNow"; s.agentAsked = ["resolvedNow"];
+  const out = await runAgentTurn(s, [], { text: "Yes, electricity was restored at 11:45 am." }, ctx);
+  expect(out.state.data.resolvedNow).toBe(true);
+  expect(out.state.data.rawText).toContain("restored at 11:45 am");
   expect(out.state.step).toBe("review");
+});
+
+it("supplies first-pass extracted facts to later model passes in the same turn", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(true);
+  vi.mocked(runTools).mockResolvedValue([{ tool: "search_member", args: { query: "Asha" }, result: "id=7 Asha Shah" }]);
+  const first: AgentTurn = {
+    reportEstablished: true, reply: "I’m checking Asha’s record, Jimmeey.",
+    classification: { category: "Member Feedback", subcategory: "General Member Feedback", confidence: 0.8, alternates: [] },
+    slots: { member: { value: "Asha" }, raisedFor: { value: "On behalf of a member" }, impact: { value: "single" } },
+    secondaryIssues: [], nextQuestion: null, readyForDraft: false,
+    toolCalls: [{ tool: "search_member", args: { query: "Asha" } }],
+  };
+  const final = { ...first, slots: { ...first.slots, momenceMemberId: { value: "7" } }, toolCalls: [], nextQuestion: { id: "custom:request", ask: "What did Asha request?" } };
+  vi.mocked(runAgent)
+    .mockResolvedValueOnce({ ok: true, latencyMs: 0, turn: first })
+    .mockImplementationOnce(async (_transcript, agentContext) => {
+      expect(agentContext.known.member).toBe("Asha");
+      expect(agentContext.known.raisedFor).toBe("On behalf of a member");
+      expect(agentContext.known.impact).toContain("One member");
+      return { ok: true, latencyMs: 0, turn: final };
+    });
+  const out = await runAgentTurn(emptyState(), [], { text: "A member named Asha raised a concern at Kemps Corner." }, ctx);
+  expect(out.state.data.memberName).toBe("Asha");
+  expect(out.state.pendingQuestionId).toBe("custom:request");
 });

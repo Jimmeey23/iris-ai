@@ -8,7 +8,20 @@ Iris's conversation problems are substantially caused by application logic aroun
 
 The previous greeting and duplicate-message fixes remain present. They do not fix these state and decision problems. Changing the model or adding another “listen carefully” prompt would leave the confirmed defects intact.
 
-This audit adds 12 offline characterization tests in `src/lib/agent-audit.test.ts`. Their passing assertions demonstrate the **current defective behavior**, not successful remediation. Production behavior has not been changed by this audit.
+The original audit added offline characterization tests in `src/lib/agent-audit.test.ts`. The remediation now converts them into production-controller regression tests: fixed question counts are removed, answers and context are matched on every turn, known facts suppress duplicate questions, corrections invalidate dependent lookup data, review-stage prose returns through AI interpretation, explicit draft requests are honoured, and unknown answers remain unknown.
+
+## Remediation status
+
+Implemented after the audit:
+
+- Completion is evidence-driven and may take one, two, three or more messages. There is no minimum question count or generic fallback ladder.
+- Each reporter message is matched into studio, time, audience, impact, location, system, membership, trainer, member, class, risk, resolution, action and frequency fields before the next reasoning pass.
+- Direct typed replies are bound to the pending field before model planning; all canonical option fields now have storage handlers.
+- Extracted facts are supplied to subsequent model/tool passes during the same turn.
+- Questions for populated fields and paraphrased resolution repeats are rejected.
+- Corrections from intake or draft review win over stale slots and clear dependent Momence records where needed.
+- The browser context bar reconciles to server-accepted facts after each response, preventing stale selections from returning.
+- Skipped and unknown values are no longer converted into false operational facts.
 
 ## Actual execution path
 
@@ -175,21 +188,19 @@ Current restoration status can be a legitimate question: moving a cooler at 11:3
 
 A witness or member-package question is not automatically necessary for this utility incident. A continued generic questionnaire after the report and restoration answer is explained by the controller defects above.
 
-## Recommended repair order
+## Remaining follow-up
 
-1. Replace the question-count floor and unconditional gates with relevant missing-information checks; require explicit drafting readiness after validation.
-2. Unify answer storage and correction handling, including review text and composer reconciliation.
-3. Track answered/partial/unknown/skipped states and enforce question relevance against them.
-4. Apply facts before lookups; invalidate dependent records and support multiple impacted sessions.
-5. Preserve the substantive report through context trimming and add session recovery/versioning.
-6. Run production-path replay tests on the outage transcript, short replies, corrections, skipped answers, compliments and multi-session incidents, then validate with live AI/Momence and browser sessions.
+1. Represent multiple affected Momence sessions as a collection rather than one session ID.
+2. Add session revisions and turn IDs to prevent concurrent request overwrites.
+3. Validate the repaired flow against live AI, Momence and an authenticated browser session.
 
 Acceptance criteria: zero repeated questions for established facts; no unrelated questions added just to reach a count; every answer has an explicit outcome; corrections survive the next turn and update the draft; unknowns never become false facts; model and rendered question decisions are observable.
 
 ## Validation and limits
 
 - `npm run typecheck`: passed.
-- `npx vitest run --exclude 'src/lib/evals/**'`: 140 tests passed across 15 files, including 12 audit characterization cases.
-- `npx eslint src/lib/agent-audit.test.ts`: passed.
+- `npx vitest run --exclude 'src/lib/evals/**'`: 138 tests passed across 15 files, including 14 repaired production-controller cases.
+- Focused ESLint across the changed source and test files: passed.
+- `npm run build`: passed.
 - `git diff --check`: passed.
-- No live model, database conversation replay, Momence or browser validation was performed. The reproduced cases control model output to isolate application defects; they do not measure how often a live model triggers each path.
+- No live model, database, Momence or browser validation was performed. The browser-control surface was unavailable in the remediation session. The regression cases control model output to isolate application behavior; they do not measure live-model frequency.

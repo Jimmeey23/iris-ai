@@ -16,7 +16,7 @@ import {
 } from "./chat-engine";
 import { CATEGORY_DEPARTMENT } from "./org";
 import { CATEGORY_META } from "./taxonomy";
-import { applyComposerContext, IMPACT_LABEL } from "./chat-inference";
+import { applyComposerContext, inferFromText, IMPACT_LABEL } from "./chat-inference";
 import { runAgent, generateSummary, questionOptions, CANONICAL_SLOTS, type AgentContext, type AgentQuestion } from "./agent";
 import { missingRequired, normaliseRaisedFor, questionBudget } from "./guardrails";
 import { issueKnowledgeBlock, suggestOwner } from "./issue-knowledge";
@@ -33,6 +33,10 @@ const DETERMINISTIC_VALUES = new Set(["approve", "edit", "restart", "new", "undo
 
 function isDeterministic(state: IntakeState, input: EngineInput): boolean {
   const value = input.value ?? "";
+  // A reporter can correct or extend a draft in ordinary language. Those words
+  // need the same extraction and correction pass as intake; only review buttons
+  // belong to the deterministic UI state machine.
+  if (state.step === "review" && input.text?.trim()) return false;
   return (
     DETERMINISTIC_STEPS.has(state.step) ||
     DETERMINISTIC_VALUES.has(value) ||
@@ -126,6 +130,11 @@ function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
     case "membershipRef": d.membershipRef = v; break;
     case "trainer": d.trainerName = v; break;
     case "member": d.memberName = v; break;
+    case "memberContact": d.memberContact = v; break;
+    case "actionTaken": d.actionTaken = v; break;
+    case "witnesses": d.witnesses = v; break;
+    case "amount": d.amount = v; break;
+    case "notes": d.notes = v; break;
     default: break; // custom:* and unknown ids ride along as words only
   }
 }
@@ -249,6 +258,37 @@ function absorbInput(
   }
 
   return { utterance: text, inferred };
+}
+
+const TEXT_ANSWER_SLOTS = new Set([
+  "member", "memberContact", "trainer", "classInfo", "location",
+  "systemAffected", "membershipRef", "occurredAt", "frequency",
+  "actionTaken", "witnesses", "amount", "notes",
+]);
+
+/** Bind a direct typed reply to the question it answers before asking the model
+ * to reason further. The model can still refine it, but cannot accidentally
+ * omit the answer from structured state. */
+function bindPendingTextAnswer(text: string, s: IntakeState): void {
+  const pending = s.pendingQuestionId;
+  const answer = text.trim();
+  if (!pending || !answer || /^(skip|don'?t know|not sure|unknown|n\/a|not applicable)[.!]?$/i.test(answer)) return;
+  if (pending === "resolvedNow") {
+    if (/^(yes|resolved|fixed|restored|back)\b/i.test(answer)) s.data.resolvedNow = true;
+    else if (/^(no|still|not|unresolved)\b/i.test(answer)) s.data.resolvedNow = false;
+    else return;
+  } else if (pending === "impact") {
+    applyAnswerToSlot(pending, answer, s);
+    if (s.data.impact === undefined) return;
+  } else if (pending === "atRisk") {
+    if (!/^(yes|no|true|false)\b/i.test(answer)) return;
+    s.data.atRisk = /^(yes|true)\b/i.test(answer);
+  } else if (TEXT_ANSWER_SLOTS.has(pending)) {
+    applyAnswerToSlot(pending, answer, s);
+  } else {
+    return;
+  }
+  markSlotSource(s, pending === "trainer" ? "trainerName" : pending, "user");
 }
 
 /* ------------------------------------------------------------------ */
@@ -421,8 +461,36 @@ function applyCorrections(
       [slot]: { value: c.value, quote: c.quote },
     };
     applySlots(wrapper, s, ctx, true);
-    markSlotSource(s, slot, "user");
+    const sourceKey = slot === "trainer" ? "trainerName" : slot;
+    markSlotSource(s, sourceKey, "user");
+    // Identity and schedule facts carry dependent lookup data. A correction to
+    // their human-readable value invalidates the old linked record atomically.
+    if (slot === "studio" || slot === "occurredAt") {
+      s.data.momenceSessionId = undefined;
+      s.data.momenceContext = undefined;
+      s.autoLookupDone = false;
+    }
+    if (slot === "member") {
+      s.data.momenceMemberId = undefined;
+      s.data.memberContact = undefined;
+      s.data.membershipRef = undefined;
+      s.memberLookupDone = false;
+    }
   }
+}
+
+/** Merge the facts from one reasoning pass before another pass or lookup runs.
+ * This guarantees later model calls receive everything already extracted from
+ * the conversation, including corrections. */
+function applyTurnFacts(turn: { slots: Record<string, { value: string | boolean | null }>; corrections?: { slot: string; value: string; quote?: string }[] }, s: IntakeState, ctx: EngineContext): void {
+  applyCorrections(turn.corrections, s, ctx);
+  const corrected = new Set(
+    (turn.corrections ?? []).map((c) => c.slot === "trainer" ? "trainerName" : c.slot),
+  );
+  const uncorrectedSlots = Object.fromEntries(
+    Object.entries(turn.slots).filter(([slot]) => !corrected.has(slot === "trainer" ? "trainerName" : slot)),
+  );
+  applySlots(uncorrectedSlots, s, ctx, false);
 }
 
 /**
@@ -629,96 +697,8 @@ function analysisChips(s: IntakeState, confidence: number): ChatMessage["analysi
 /* Turn                                                                */
 /* ------------------------------------------------------------------ */
 
-/**
- * Coverage floor: the owner wants the full story every time — who/what/where/
- * when, impact, what was already tried and whether it is still happening. A
- * ticket drafted off a single message is rarely routable, so the agent keeps
- * the conversation going until at least this many distinct questions have gone
- * out (the reporter can still say "just raise it" to skip ahead).
- */
-export const MIN_AGENT_QUESTIONS = 4;
-/** Upper bound for the back-filled ladder, so "at least 4-5" never becomes 8. */
-const LADDER_MAX = 5;
-
 function firstName(ctx: EngineContext): string {
   return ctx.reporter.name.split(" ")[0] || "there";
-}
-
-/**
- * High-value follow-ups for when the model is out of questions but the floor
- * is not met yet. Ordered by owner value; each fires once (agentAsked dedupes)
- * and only when the slot is genuinely unknown.
- */
-export function followUpQuestion(
-  s: IntakeState,
-  ctx: EngineContext,
-): { id: string; ask: string; options?: { label: string; value: string }[]; allowFreeText: boolean; placeholder?: string } | null {
-  if ((s.agentAsked?.length ?? 0) >= LADDER_MAX) return null;
-  const d = s.data;
-  const first = firstName(ctx);
-
-  const ladder: ({
-    id: string;
-    ask: string;
-    options?: { label: string; value: string }[];
-    allowFreeText: boolean;
-    placeholder?: string;
-  } | null)[] = [
-    !d.actionTaken
-      ? {
-          id: "actionTaken",
-          ask: `Have you or the team already tried anything on it, ${first}?`,
-          allowFreeText: true,
-          placeholder: "e.g. moved the class, restart the unit, told reception…",
-        }
-      : null,
-    !d.occurredAt
-      ? {
-          id: "occurredAt",
-          ask: `When did this actually happen, ${first}?`,
-          options: ["Just now", "This morning", "Yesterday", "Earlier this week"].map((label) => ({
-            label,
-            value: `ans:occurredAt|${label}`,
-          })),
-          allowFreeText: true,
-        }
-      : null,
-    !d.frequency
-      ? {
-          id: "frequency",
-          ask: `First time you've seen this one, or a repeat offender?`,
-          options: ["First time", "Happened before", "Keeps happening"].map((label) => ({
-            label,
-            value: `ans:frequency|${label}`,
-          })),
-          allowFreeText: true,
-        }
-      : null,
-    d.raisedFor === "On behalf of a member" && d.memberName && !d.membershipRef
-      ? {
-          id: "membershipRef",
-          ask: `Do you know what pack or membership ${d.memberName.split(" ")[0]} is on, ${first}?`,
-          allowFreeText: true,
-          placeholder: "e.g. 20-class pack, annual, trial…",
-        }
-      : null,
-    !d.witnesses
-      ? {
-          id: "witnesses",
-          ask: `Anyone else see it or involved, ${first}?`,
-          allowFreeText: true,
-        }
-      : null,
-    {
-      id: "custom:owner_update",
-      ask: `Anything you want me to tell the owner directly, ${first} — or should they copy you on the fix?`,
-      allowFreeText: true,
-    },
-  ];
-  for (const q of ladder) {
-    if (q && !(s.agentAsked ?? []).includes(q.id)) return q;
-  }
-  return null;
 }
 
 export type AgentTurnResult = EngineResult & {
@@ -771,7 +751,19 @@ export async function runAgentTurn(
   };
 
   const { utterance, inferred } = absorbInput(input, s, ctx);
-  if (!s.data.rawText && utterance) s.data.rawText = utterance;
+  // Match context fields on every message, not just the opening report. This
+  // makes later volunteered details available before the model plans a question
+  // or a Momence lookup.
+  if (utterance) {
+    bindPendingTextAnswer(utterance, s);
+    const before = { ...s.data };
+    inferred.push(...inferFromText(utterance, s, ctx));
+    for (const [key, value] of Object.entries(s.data)) {
+      if (value !== undefined && value !== before[key as keyof typeof before]) {
+        markSlotSource(s, key === "trainerName" ? "trainerName" : key, "user");
+      }
+    }
+  }
 
   // Nothing was actually said — don't spend a model call on an empty turn.
   const hasNarrative = utterance || transcript.some((m) => m.role === "user" && m.content.trim());
@@ -902,6 +894,15 @@ export async function runAgentTurn(
     };
   }
 
+  // Keep the durable report narrative free of greeting-only turns, while still
+  // retaining every substantive follow-up that may matter to the final draft.
+  if (result.turn.reportEstablished !== false && utterance) {
+    const existing = s.data.rawText?.trim();
+    if (!existing || !existing.endsWith(utterance)) {
+      s.data.rawText = [existing, utterance].filter(Boolean).join(" ");
+    }
+  }
+
   // Conversation is not a ticket yet. Keep the model's invitation and do not
   // classify, consume the question budget, or inject operational gates.
   if (result.turn.reportEstablished === false) {
@@ -915,6 +916,8 @@ export async function runAgentTurn(
       messages: [assistantMessage(result.turn.reply, { allowFreeText: true, placeholder: "What did the community member share, or what happened?" })],
     };
   }
+
+  applyTurnFacts(result.turn, s, ctx);
 
   // Momence lookup loop. The agent asks for facts, we fetch them, it continues.
   // Capped so a confused model cannot spin, and every result is remembered on
@@ -934,6 +937,7 @@ export async function runAgentTurn(
     );
     if (!next.ok || !next.turn) break;
     result = next;
+    applyTurnFacts(next.turn, s, ctx);
   }
 
   // The model must never burn a question on facts Momence holds. When a member
@@ -952,6 +956,7 @@ export async function runAgentTurn(
         { onReplyDelta: hooks.onReplyDelta },
       );
       if (next.ok && next.turn) result = next;
+      if (next.ok && next.turn) applyTurnFacts(next.turn, s, ctx);
     }
   }
 
@@ -997,6 +1002,7 @@ export async function runAgentTurn(
         { onReplyDelta: hooks.onReplyDelta },
       );
       if (next.ok && next.turn) result = next;
+      if (next.ok && next.turn) applyTurnFacts(next.turn, s, ctx);
     }
   }
 
@@ -1017,8 +1023,6 @@ export async function runAgentTurn(
 
   // Corrections are the model's explicit record that the reporter revised an
   // earlier fact — they may override anything, then re-lock to the human side.
-  applyCorrections(turn.corrections, s, ctx);
-  applySlots(turn.slots, s, ctx, false);
   if (turn.extraDetails && Object.keys(turn.extraDetails).length) {
     s.data.extraDetails = { ...(s.data.extraDetails ?? {}), ...turn.extraDetails };
   }
@@ -1039,9 +1043,36 @@ export async function runAgentTurn(
     ...turn.classification.alternates.map((a) => ({ ...a, confidence: 0.4 })),
   ];
 
-  const budgetSpent = (s.agentAsked?.length ?? 0) >= budget;
   const missing = missingRequired(s.data);
   let question = turn.nextQuestion;
+  const knownQuestionSlots: Record<string, unknown> = {
+    studio: s.data.studioName,
+    raisedFor: s.data.raisedFor,
+    member: s.data.memberName,
+    memberContact: s.data.memberContact,
+    trainer: s.data.trainerName,
+    classInfo: s.data.classInfo,
+    location: s.data.location,
+    systemAffected: s.data.systemAffected,
+    membershipRef: s.data.membershipRef,
+    occurredAt: s.data.occurredAt,
+    impact: s.data.impact,
+    atRisk: s.data.atRisk,
+    resolvedNow: s.data.resolvedNow,
+    frequency: s.data.frequency,
+    actionTaken: s.data.actionTaken,
+    witnesses: s.data.witnesses,
+    amount: s.data.amount,
+    notes: s.data.notes,
+  };
+
+  // The controller is the final guard against asking for an established fact.
+  if (question && !question.id.startsWith("custom:") && knownQuestionSlots[question.id] !== undefined) {
+    question = null;
+  }
+  if (question && /resolv|still (ongoing|happening)|current status/i.test(`${question.id} ${question.ask}`) && s.data.resolvedNow !== undefined) {
+    question = null;
+  }
 
   // A question about the studio is the studio question, whatever the model
   // decided to call it — that keeps the picker and the dedupe below honest.
@@ -1061,7 +1092,12 @@ export async function runAgentTurn(
     // Studio drives routing — it overrides whatever the model asked this turn.
     question = { id: "studio", ask: GATE_ASK.studio, allowFreeText: false };
   } else if (!question) {
-    for (const gate of ["resolvedNow", "impact"] as const) {
+    const operationalFault = [
+      "Repair and Maintenance", "Tech Issues", "Operating Systems",
+      "Safety and Security", "Class Experience",
+    ].includes(s.data.category ?? "");
+    const relevantGates = operationalFault ? (["resolvedNow", "impact"] as const) : (["impact"] as const);
+    for (const gate of relevantGates) {
       if (!missing.includes(gate) || (s.agentAsked ?? []).includes(gate)) continue;
       question = {
         id: gate,
@@ -1086,22 +1122,13 @@ export async function runAgentTurn(
     question = null;
   }
 
-  // The budget suppresses optional questions only — routing and the two
-  // owner-critical gates always get their one focused ask.
-  if (budgetSpent && question && !["studio", "impact", "resolvedNow"].includes(question.id)) {
-    question = null;
-  }
-
-  // Coverage floor: no draft until the agent has asked at least
-  // MIN_AGENT_QUESTIONS distinct questions. Back-fill from the ladder when the
-  // model ran out early — unless the reporter explicitly wants it filed now.
+  // Reporters can explicitly stop clarification. We retain unknown fields as
+  // unknown and build the best reviewable draft from the evidence provided.
   const wantsDraftNow =
-    /just (raise|file|log|create)( the)? (it|ticket|draft)\b|raise (it|the ticket) (now|directly)|skip (the )?questions|no more questions|draft it now/i.test(
+    /just (raise|file|log|create)( the)? (it|ticket|draft)\b|raise (it|the ticket) (now|directly)|skip (the )?questions|no more questions|(?:show|make|create|prepare) (?:me )?(?:the )?draft|draft it now/i.test(
       utterance,
     );
-  if (!question && !wantsDraftNow && (s.agentAsked?.length ?? 0) < MIN_AGENT_QUESTIONS) {
-    question = followUpQuestion(s, ctx);
-  }
+  if (wantsDraftNow) question = null;
 
   const first = (state.agentAsked?.length ?? 0) === 0 && state.step === "describe";
 
@@ -1124,10 +1151,8 @@ export async function runAgentTurn(
 
   // A gate that was asked and skipped must not block the draft — record the
   // honest default instead ("minor/single impact", "not yet resolved").
-  if (s.data.impact === undefined) s.data.impact = "single";
-  if (s.data.resolvedNow === undefined && (s.agentAsked ?? []).includes("resolvedNow")) {
-    s.data.resolvedNow = false;
-  }
+  // Unknown stays unknown. The draft may state that follow-up is required, but
+  // must never turn a skipped or unclear reply into a confirmed fact.
 
   hooks.onStatus?.("Building the draft");
   const insight = await insightFromAgent({

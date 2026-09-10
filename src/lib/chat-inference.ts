@@ -6,6 +6,12 @@ import { markSlotSource, type EngineContext, type IntakeState } from "./chat-eng
 export const CLASS_FORMATS = [
   "Barre 57", "Cardio Barre", "Studio FIT", "Mat 57", "Power Cycle", "Private Session", "Not class specific",
 ];
+const CLASS_ALIASES: { re: RegExp; value: string }[] = [
+  { re: /\b(?:bbb|barre beyond basics)\b/i, value: "Barre Beyond Basics" },
+  { re: /\b(?:power\s*cycle|cycle)\b/i, value: "Power Cycle" },
+  { re: /\b(?:studio\s*fit|fit)\b/i, value: "Studio FIT" },
+  { re: /\bstrength\s*lab\b/i, value: "Strength Lab" },
+];
 
 export const LOCATIONS = [
   "Main studio floor", "Studio 2", "Reception / lobby", "Locker room", "Showers / washroom",
@@ -62,8 +68,8 @@ const RAISED_FOR_PATTERNS: { re: RegExp; value: string }[] = [
 ];
 
 const IMPACT_PATTERNS: { re: RegExp; key: string }[] = [
-  { re: /\b(unsafe|danger|injur|emergency|evacuat|fire|blocked exit|electric|fainted|collapsed|bleeding|harass)/i, key: "safety" },
-  { re: /\b(whole class|entire class|all members|several members|multiple members|everyone|many members|both studios)\b/i, key: "many" },
+  { re: /\b(unsafe|danger|injur|emergency|evacuat|fire|blocked exit|electric shock|electrocut|live wire|fainted|collapsed|bleeding|harass)/i, key: "safety" },
+  { re: /\b(whole class|entire class|all members|several members|multiple members|everyone|many members|both studios|several classes|multiple classes|\d+ classes)\b/i, key: "many" },
   { re: /\b(suggest|idea|would be nice|recommend|request for|it would help|proposal)\b/i, key: "suggestion" },
   { re: /\b(a member|one member|she|he) (complained|reported|said|asked)\b/i, key: "single" },
 ];
@@ -100,6 +106,11 @@ const MEMBERSHIP_PATTERNS: { re: RegExp; value: string }[] = [
 
 const RISK_YES = /\b(unsafe|still happening|right now|danger|injur|bleeding|fainted|collapsed|fire|emergency|harass|assault|trapped|electric shock)\b/i;
 const NO_RISK = /\b(no one was hurt|nobody hurt|no injury|not urgent|no one is at risk)\b/i;
+const RESOLVED_YES = /\b(power|electricity|issue|problem|fault|it)\s+(?:is|was|has been)?\s*(?:back|restored|fixed|resolved)|\beverything (?:is|was) (?:back|restored|fixed|resolved)|\bno longer happening\b/i;
+const RESOLVED_NO = /\b(still (?:happening|ongoing|down|out|broken|unresolved)|not (?:fixed|resolved|restored)|hasn'?t been (?:fixed|resolved|restored))\b/i;
+const ACTION_RE = /\b(?:we|i|team|staff|instructor)\s+(?:have\s+|had\s+|already\s+)?(moved|provided|offered|shifted|called|contacted|restarted|reset|apologised|apologized|refunded|credited|cleaned|replaced|blocked|closed)\b/i;
+const REPEAT_RE = /\b(again|repeat(?:ed)?|recurring|keeps happening|happened before|multiple times)\b/i;
+const FIRST_TIME_RE = /\b(first time|never happened before)\b/i;
 
 const STOP_NAMES = new Set([
   "Member", "Client", "Guest", "Customer", "She", "He", "They", "Someone", "Trainer",
@@ -190,6 +201,9 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
     const formats = CLASS_FORMATS.filter(
       (f) => f !== "Not class specific" && text.toLowerCase().includes(f.toLowerCase()),
     );
+    for (const alias of CLASS_ALIASES) {
+      if (alias.re.test(text) && !formats.includes(alias.value)) formats.push(alias.value);
+    }
     const legacyTime = text.match(MEMBER_TIME_RE)?.[1];
     const uniqueTimes = [...new Set(times.length ? times : legacyTime ? [legacyTime.toUpperCase()] : [])];
     if (uniqueTimes.length || formats.length) {
@@ -212,6 +226,28 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
       note("Immediate risk · No");
     }
   }
+  if (d.resolvedNow === undefined) {
+    if (RESOLVED_YES.test(text)) {
+      d.resolvedNow = true;
+      note("Resolution · Resolved");
+    } else if (RESOLVED_NO.test(text)) {
+      d.resolvedNow = false;
+      note("Resolution · Still happening");
+    }
+  }
+  if (d.actionTaken === undefined && ACTION_RE.test(text)) {
+    d.actionTaken = text.trim();
+    note("Action taken · Captured");
+  }
+  if (d.frequency === undefined) {
+    if (REPEAT_RE.test(text)) {
+      d.frequency = "Happened before / recurring";
+      note("Frequency · Repeat");
+    } else if (FIRST_TIME_RE.test(text)) {
+      d.frequency = "First time";
+      note("Frequency · First time");
+    }
+  }
   return found;
 }
 
@@ -219,40 +255,40 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
 export function applyComposerContext(context: ComposerContext, s: IntakeState): string[] {
   const d = s.data;
   const found: string[] = [];
-  if (context.studioName) {
+  if (context.studioName && d.studioName === undefined) {
     d.studioId = context.studioId ?? null;
     d.studioName = context.studioName;
     markSlotSource(s, "studio", "context");
     found.push(`Studio · ${context.studioName}`);
   }
-  if (context.memberName) {
+  if (context.memberName && d.memberName === undefined) {
     d.memberName = context.memberName;
     d.raisedFor = d.raisedFor ?? "On behalf of a member";
     markSlotSource(s, ["member", "raisedFor"], "context");
     found.push(`Member · ${context.memberName}`);
   }
-  if (context.memberContact) d.memberContact = context.memberContact;
-  if (context.memberId) d.momenceMemberId = context.memberId;
-  if (context.trainerName) {
+  if (context.memberContact && d.memberContact === undefined) d.memberContact = context.memberContact;
+  if (context.memberId && d.momenceMemberId === undefined) d.momenceMemberId = context.memberId;
+  if (context.trainerName && d.trainerName === undefined) {
     d.trainerName = context.trainerName;
     markSlotSource(s, "trainerName", "context");
     found.push(`Trainer · ${context.trainerName}`);
   }
-  if (context.classInfo) {
+  if (context.classInfo && d.classInfo === undefined) {
     d.classInfo = context.classInfo;
     markSlotSource(s, "classInfo", "context");
     found.push(`Class · ${context.classInfo}`);
   }
-  if (context.classAt) {
+  if (context.classAt && d.classAt === undefined) {
     d.classAt = context.classAt;
     d.occurredAt = d.occurredAt ?? describeWhen(context.classAt);
     found.push(`Class time · ${context.classAt}`);
   }
-  if (context.sessionId) {
+  if (context.sessionId && d.momenceSessionId === undefined) {
     d.momenceSessionId = context.sessionId;
     markSlotSource(s, "momenceSessionId", "context");
   }
-  if (context.membershipRef) {
+  if (context.membershipRef && d.membershipRef === undefined) {
     d.membershipRef = context.membershipRef;
     markSlotSource(s, "membershipRef", "context");
     found.push(`Membership · ${context.membershipRef}`);

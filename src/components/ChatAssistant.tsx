@@ -416,6 +416,31 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
         setSessionId(data.sessionId);
         setStep(data.step);
         setCapture(data.capture ?? {});
+        // Keep the visible context bar aligned with facts accepted by the
+        // server, including natural-language corrections made during intake or
+        // from the draft review.
+        setContext((previous) => {
+          const c = data.capture ?? {};
+          return {
+            ...previous,
+            studioId: c.studioId as number | null | undefined,
+            studioName: c.studioName as string | undefined,
+            memberId: c.momenceMemberId as number | undefined,
+            memberName: c.memberName as string | undefined,
+            memberContact: c.memberContact as string | undefined,
+            trainerName: c.trainerName as string | undefined,
+            classInfo: c.classInfo as string | undefined,
+            classAt: c.classAt as string | undefined,
+            sessionId: c.momenceSessionId as number | undefined,
+            membershipRef: c.membershipRef as string | undefined,
+            category: c.category as string | undefined,
+            subcategory: c.subcategory as string | undefined,
+            raisedFor: c.raisedFor as string | undefined,
+            occurredAt: c.occurredAt as string | undefined,
+            location: c.location as string | undefined,
+            impact: c.impact as string | undefined,
+          };
+        });
         setAgentMode(data.mode ?? "agent");
         if (payload.reset) {
           setMessages(data.messages);
