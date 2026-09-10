@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { apiFetch } from "@/lib/api-client";
 import { colorFor } from "@/lib/org";
 import type { Role } from "@/lib/session";
 
@@ -74,8 +75,7 @@ export function Providers({ children }: { children: ReactNode }) {
     setTheme(next);
     document.documentElement.classList.toggle("dark", next === "dark");
 
-    fetch("/api/auth/me")
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch<{ user?: { id: string; name: string; email: string; role: Role; department: string; jobTitle: string; studio: string } }>("/api/auth/me")
       .then((data) => {
         if (!data?.user) return;
         const u = data.user as {
@@ -99,6 +99,9 @@ export function Providers({ children }: { children: ReactNode }) {
           department: u.department,
         });
       })
+      .catch((error: unknown) => {
+        console.error("Unable to load the signed-in profile", error);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -114,7 +117,7 @@ export function Providers({ children }: { children: ReactNode }) {
   const themeValue = useMemo(() => ({ theme, toggle }), [theme, toggle]);
 
   const signOut = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await apiFetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
   }, []);
 

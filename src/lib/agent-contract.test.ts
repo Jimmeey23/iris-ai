@@ -14,6 +14,12 @@ function turn(patch: Partial<AgentTurn>): AgentTurn {
 }
 
 describe("agent turn contract", () => {
+  it("accepts a conversational invitation before a report exists", () => {
+    expect(isCoherentAgentTurn(turn({ reportEstablished: false, reply: "What happened?" }))).toBe(true);
+    expect(isCoherentAgentTurn(turn({ reportEstablished: false, readyForDraft: true }))).toBe(false);
+    expect(isCoherentAgentTurn(turn({ reportEstablished: false, toolCalls: [{ tool: "search_member", args: { query: "hi" } }] }))).toBe(false);
+  });
+
   it("accepts a contextual follow-up question", () => {
     expect(isCoherentAgentTurn(turn({ nextQuestion: { id: "custom:current_state", ask: "Is the AC still down?" } }))).toBe(true);
   });

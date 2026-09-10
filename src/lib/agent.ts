@@ -64,6 +64,8 @@ export type AgentTurn = {
   slots: Record<string, { value: string | boolean | null; quote?: string }>;
   secondaryIssues: AgentIssue[];
   nextQuestion: AgentQuestion | null;
+  /** False while the reporter has only greeted us or has not described a reportable matter. */
+  reportEstablished?: boolean;
   readyForDraft: boolean;
   insight?: AgentInsight;
   /** Facts worth carrying onto the ticket that no slot covers. */
@@ -85,6 +87,7 @@ export type AgentTurn = {
 export function isCoherentAgentTurn(turn: AgentTurn): boolean {
   const hasQuestion = Boolean(turn.nextQuestion?.ask);
   const hasTools = Boolean(turn.toolCalls?.length);
+  if (turn.reportEstablished === false) return !turn.readyForDraft && !hasTools && Boolean(turn.reply.trim());
   return turn.readyForDraft ? !hasQuestion && !hasTools : hasQuestion || hasTools;
 }
 
@@ -125,9 +128,10 @@ const AGENT_RESPONSE_SCHEMA = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["reply", "classification", "slots", "secondaryIssues", "extraDetails", "nextQuestion", "toolCalls", "readyForDraft", "insight"],
+    required: ["reply", "reportEstablished", "classification", "slots", "secondaryIssues", "extraDetails", "nextQuestion", "toolCalls", "readyForDraft", "insight"],
     properties: {
       reply: { type: "string" },
+      reportEstablished: { type: "boolean" },
       classification: {
         type: "object", additionalProperties: false,
         required: ["category", "subcategory", "confidence", "reason", "alternates"],
@@ -174,6 +178,7 @@ const SYSTEM_PROMPT = `You are Iris, the intake agent for Physique 57 India — 
 Your job is to turn each report into the most accurate, complete and routable ticket possible — so complete that the owner never has to ask "but what exactly happened, where, and has it been fixed?". Every question costs a busy reporter time, so make each one count; the system enforces the coverage floor, so never rush to the draft while something owner-critical is still open.
 
 HOW YOU THINK
+- First determine whether the reporter has described a reportable concern, request, feedback or incident anywhere in the conversation. Set reportEstablished=false for greetings, small talk, or a bare request to report something without details. In that case put a natural invitation to describe the matter in reply, set nextQuestion=null, readyForDraft=false, toolCalls=[], slots={}, and classification confidence=0. Do not ask for studio, impact or resolution yet. Once an actual matter has been described, set reportEstablished=true, even if it is brief or hard to classify.
 - Read the whole conversation every turn. Facts stated anywhere — including mid-sentence, in passing, or in an earlier answer — are already known. Never ask for them again.
 - Distinguish ROOT CAUSE from SYMPTOM. If one underlying fault produced several visible problems (a power cut causing no AC, no lights and no music), classify the ticket by the ROOT CAUSE and list the symptoms as secondary issues. Do not file the ticket under the loudest keyword.
 - Read negation and absence correctly. "no music" is not a music-too-loud complaint; "no AC" is not an AC-too-cold complaint.
@@ -244,6 +249,7 @@ OUTPUT
 Return STRICT JSON only, matching this shape exactly:
 {
   "reply": "your conversational message to the reporter — 1-2 sentences",
+  "reportEstablished": true,
   "classification": {
     "category": "exact category name from the taxonomy",
     "subcategory": "exact subcategory name from that category",
@@ -517,6 +523,7 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
 
   return {
     reply: tidyReply(raw.reply, "Got it."),
+    reportEstablished: raw.reportEstablished,
     classification: {
       category: resolved.category,
       subcategory: resolved.subcategory,
