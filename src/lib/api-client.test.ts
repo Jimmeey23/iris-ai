@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { apiPostStream } from "./api-client";
+import { apiFetch, apiPostStream } from "./api-client";
 
 /**
  * Encodes frames exactly the way `/api/chat/stream` does, so this exercises the
@@ -88,4 +88,16 @@ describe("apiPostStream", () => {
     );
     await expect(apiPostStream("/api/chat/stream", {}, {})).rejects.toMatchObject({ status: 401 });
   });
+});
+
+
+it("resolves profile URLs before an extension parses them without a base", async () => {
+  vi.stubGlobal("window", { location: { origin: "http://localhost:3000" } });
+  const intercepted = vi.fn(async (url: string) => {
+    expect(new URL(url).pathname).toBe("/api/auth/me");
+    return Response.json({ user: { name: "Jimmeey" } });
+  });
+  vi.stubGlobal("fetch", intercepted);
+  await expect(apiFetch("/api/auth/me")).resolves.toEqual({ user: { name: "Jimmeey" } });
+  expect(intercepted).toHaveBeenCalledWith("http://localhost:3000/api/auth/me", undefined);
 });

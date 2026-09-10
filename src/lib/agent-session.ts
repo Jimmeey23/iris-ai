@@ -895,6 +895,20 @@ export async function runAgentTurn(
     };
   }
 
+  // Conversation is not a ticket yet. Keep the model's invitation and do not
+  // classify, consume the question budget, or inject operational gates.
+  if (result.turn.reportEstablished === false) {
+    s.step = "describe";
+    s.pendingQuestionId = null;
+    return {
+      state: s,
+      usedAgent: true,
+      userUtterance: utterance,
+      model: result.model,
+      messages: [assistantMessage(result.turn.reply, { allowFreeText: true, placeholder: "What did the community member share, or what happened?" })],
+    };
+  }
+
   // Momence lookup loop. The agent asks for facts, we fetch them, it continues.
   // Capped so a confused model cannot spin, and every result is remembered on
   // the session so the same lookup is never paid for twice.
@@ -1032,7 +1046,7 @@ export async function runAgentTurn(
   // what the owner physically does, so they outrank the question budget: one
   // focused question each, never the same one twice, with concrete options.
   const GATE_ASK: Record<string, string> = {
-    studio: "Last thing — which studio is this?",
+    studio: "Which studio does this relate to?",
     impact: "How wide is the impact — safety risk, several members, one member, or a suggestion?",
     resolvedNow: "Is this resolved now, or still happening?",
   };
