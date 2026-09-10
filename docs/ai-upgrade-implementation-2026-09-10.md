@@ -57,3 +57,24 @@ The sandbox has no Supabase project, so `src/lib/dev-auth.ts` adds a **dev-only*
 - The deterministic engine still exists for review/edit mechanics (draft preview, edit menu, undo) — but no longer asks intake questions in agent mode.
 - Read-only Momence tool surface unchanged (prior audit H5 scoping still recommended).
 - Security items from `application-audit-2026-09-04.md` (C1–C3, H1–H3) remain tracked there.
+
+## Preview send fix (commit 3ad4aa7, 2026-09-10)
+
+The reported "unable to send any messages to Iris" was two stacked issues:
+
+1. **First-message swallow (real bug, fixed).** `runChatTurn` greeted a brand-new
+   session and returned — silently dropping the words the reporter had already
+   typed in the same payload. The greeting now seeds the transcript only; the
+   words are processed as the opening turn (honest degradation applies when the
+   AI key is absent).
+2. **Preview proxy vs SSE POST (environment, made resilient).** In the hosted
+   preview, `POST /api/chat/stream` with `Accept: text/event-stream` can be
+   rejected before reaching the route while the identical JSON POST succeeds.
+   The client now detects that (stream 4xx before any server event), remembers
+   it for the browser session (`sessionStorage["iris:streamBlocked"]`), and
+   sends plain JSON from then on. Error details from failed turns are now
+   surfaced in the chat bubble instead of a bare generic message.
+
+Support changes: `parseBody` logs every 400 with issue list + truncated body
+(server-side diagnosability), and `allowedDevOrigins: ["*.e2b.app"]` unblocks
+HMR through the preview proxy in dev.
