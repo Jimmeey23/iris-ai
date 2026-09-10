@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { matchSession, parseSessionRows, reportedTimes, resolveStudio } from "./agent-session";
 import { emptyState, markSlotSource, slotSource, valueToWords } from "./chat-engine";
+import { applyOptionAnswer } from "./agent-session";
 
 const STUDIOS = [
   { id: 1, name: "Kwality House, Kemps Corner", code: "KC", city: "Mumbai", isHq: false },
@@ -166,5 +167,51 @@ describe("slot provenance", () => {
     markSlotSource(s, ["classInfo", "trainerName"], "context");
     expect(slotSource(s, "classInfo")).toBe("context");
     expect(slotSource(s, "trainerName")).toBe("context");
+  });
+});
+
+describe("option answers bind to slots", () => {
+  it("parses sentence-style gate labels to their values", () => {
+    const s = emptyState();
+    const r = applyOptionAnswer("ans:resolved|Yes — resolved", s, "resolvedNow");
+    expect(r.slot).toBe("resolvedNow");
+    expect(s.data.resolvedNow).toBe(true);
+    expect(slotSource(s, "resolvedNow")).toBe("user");
+
+    const s2 = emptyState();
+    applyOptionAnswer("ans:resolved|No — still happening", s2, "resolvedNow");
+    expect(s2.data.resolvedNow).toBe(false);
+  });
+
+  it("maps impact labels onto the stable keys, and refuses to invent one", () => {
+    const s = emptyState();
+    applyOptionAnswer("ans:impact|Several members affected", s, "impact");
+    expect(s.data.impact).toBe("many");
+
+    const s2 = emptyState();
+    applyOptionAnswer("ans:impact|Not applicable", s2, "impact");
+    expect(s2.data.impact).toBeUndefined();
+  });
+
+  it("normalises raised-for labels onto the canonical enum", () => {
+    const s = emptyState();
+    applyOptionAnswer("ans:raisedFor|A member reported it", s, "raisedFor");
+    expect(s.data.raisedFor).toBe("On behalf of a member");
+  });
+
+  it("binds plain answers to the pending canonical question", () => {
+    const s = emptyState();
+    s.pendingQuestionId = "frequency";
+    const r = applyOptionAnswer("ans:First time", s, "frequency");
+    expect(r.slot).toBe("frequency");
+    expect(s.data.frequency).toBe("First time");
+  });
+
+  it("never binds plain answers when no canonical question is pending", () => {
+    const s = emptyState();
+    s.pendingQuestionId = "custom:offer_made";
+    const r = applyOptionAnswer("ans:They accepted a credit", s, "custom:offer_made");
+    expect(r.slot).toBeUndefined();
+    expect(s.data.extraDetails).toBeUndefined();
   });
 });

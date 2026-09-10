@@ -49,14 +49,14 @@ const CANONICAL_SLOT_IDS = new Set<string>(CANONICAL_SLOTS);
 /**
  * Option answers, in two shapes: `ans:<slotId>|<label>` names the slot
  * explicitly (gates), and plain `ans:<label>` binds to the question currently
- * pending when that question is a canonical slot. Both fill the slot in code
- * *and* speak the words, so a tap is never a silent no-op.
+ * pending when that question is a canonical slot. Pure so the contract tests
+ * can exercise it; `applyOptionAnswer` is the stateful wrapper.
  */
-function absorbExplicitAnswer(
+function resolveOptionAnswer(
   value: string,
-  s: IntakeState,
-): { slot: string; label: string } | null {
-  if (!value.startsWith("ans:")) return null;
+  pendingQuestionId?: string | null,
+): { slot?: string; label: string } {
+  if (!value.startsWith("ans:")) return { label: "" };
   const rest = value.slice(4);
   const sep = rest.indexOf("|");
   let id: string;
@@ -66,15 +66,23 @@ function absorbExplicitAnswer(
     label = rest.slice(sep + 1);
   } else {
     label = rest;
-    const pending = s.pendingQuestionId ?? null;
-    if (!pending || !CANONICAL_SLOT_IDS.has(pending)) return { slot: "", label };
+    const pending = pendingQuestionId ?? null;
+    if (!pending || !CANONICAL_SLOT_IDS.has(pending)) return { label };
     id = pending;
   }
-  if (!id || !label) return { slot: "", label };
-  const slot = id === "resolved" ? "resolvedNow" : id;
-  applyAnswerToSlot(slot, label, s);
-  markSlotSource(s, slot, "user");
-  return { slot, label };
+  if (!id || !label) return { label };
+  return { slot: id === "resolved" ? "resolvedNow" : id, label };
+}
+
+function absorbExplicitAnswer(
+  value: string,
+  s: IntakeState,
+): { slot: string; label: string } | null {
+  const result = resolveOptionAnswer(value, s.pendingQuestionId ?? null);
+  if (!result.slot) return null;
+  applyAnswerToSlot(result.slot, result.label, s);
+  markSlotSource(s, result.slot, "user");
+  return { slot: result.slot, label: result.label };
 }
 
 /** Deterministic mapping from a canonical slot id to a tapped option label. */
@@ -93,10 +101,21 @@ function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
             ? /one member|minor|single/i.test(v)
             : v.toLowerCase().includes(k),
       );
-      d.impact = key ?? "single";
+      // A skip-style label ("Not applicable") must not invent a wrong impact.
+      if (key) d.impact = key;
       break;
     }
-    case "resolvedNow": d.resolvedNow = /^(yes|true|resolved|fixed|it'?s (fixed|resolved|fine now))$/i.test(v); break;
+    case "resolvedNow": {
+      // Anchored, prefix-tolerant: gate labels are sentences like
+      // "Yes — resolved" / "No — still happening".
+      const t = v.trim().toLowerCase();
+      d.resolvedNow = /^(true|yes|resolved|fixed|fine)/.test(t)
+        ? true
+        : /^(false|no|not|still|unresolved|happening)/.test(t)
+          ? false
+          : d.resolvedNow;
+      break;
+    }
     case "atRisk": d.atRisk = /^(yes|true)/i.test(v); break;
     case "frequency": d.frequency = v; break;
     case "occurredAt": d.occurredAt = v; break;
@@ -108,6 +127,24 @@ function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
     case "member": d.memberName = v; break;
     default: break; // custom:* and unknown ids ride along as words only
   }
+}
+
+/**
+ * Apply an option click to state — the code path behind every tap. Exported for
+ * the contract tests: a click must never be a silent no-op, and sentence-style
+ * labels ("Yes — resolved") must parse to their slot values.
+ */
+export function applyOptionAnswer(
+  value: string,
+  s: IntakeState,
+  pendingQuestionId?: string | null,
+): { slot?: string; label: string } {
+  const result = resolveOptionAnswer(value, pendingQuestionId);
+  if (result.slot) {
+    applyAnswerToSlot(result.slot, result.label, s);
+    markSlotSource(s, result.slot, "user");
+  }
+  return result;
 }
 
 /**
@@ -924,6 +961,13 @@ export async function runAgentTurn(
   if (s.data.studioName === undefined) {
     s.data.studioId = null;
     s.data.studioName = "Not studio specific";
+  }
+
+  // A gate that was asked and skipped must not block the draft — record the
+  // honest default instead ("minor/single impact", "not yet resolved").
+  if (s.data.impact === undefined) s.data.impact = "single";
+  if (s.data.resolvedNow === undefined && (s.agentAsked ?? []).includes("resolvedNow")) {
+    s.data.resolvedNow = false;
   }
 
   hooks.onStatus?.("Building the draft");
