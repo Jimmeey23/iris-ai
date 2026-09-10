@@ -7,6 +7,7 @@ import {
   jsonb,
   boolean,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const studios = pgTable("studios", {
@@ -108,6 +109,38 @@ export const tickets = pgTable("tickets", {
   index("tickets_studio_id_idx").on(t.studioId),
   index("tickets_category_idx").on(t.category),
   index("tickets_parent_ticket_id_idx").on(t.parentTicketId),
+]);
+
+/**
+ * Inbound emails awaiting or receiving triage. Every email that arrives (via
+ * the provider webhook or pasted in the Inbox) is stored raw first, then
+ * triaged into a ticket — so nothing is lost even when triage fails, and the
+ * same message can never raise two tickets (unique message id).
+ */
+export const inboundEmails = pgTable("inbound_emails", {
+  id: serial("id").primaryKey(),
+  /** Provider message id, or a stable hash for pasted emails. */
+  messageId: text("message_id").notNull(),
+  /** Normalised subject + sender — groups replies into one thread. */
+  threadKey: text("thread_key").notNull(),
+  fromName: text("from_name"),
+  fromEmail: text("from_email").notNull(),
+  toEmail: text("to_email"),
+  subject: text("subject").notNull().default("(no subject)"),
+  bodyText: text("body_text").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  /** received → ticketed | duplicate | rejected. */
+  status: text("status").notNull().default("received"),
+  ticketId: integer("ticket_id"),
+  /** How triage went, or why it was rejected. */
+  triageNote: text("triage_note"),
+  /** The original webhook payload, kept for audit and replay. */
+  raw: jsonb("raw").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("inbound_emails_message_id_key").on(t.messageId),
+  index("inbound_emails_thread_idx").on(t.threadKey),
+  index("inbound_emails_ticket_id_idx").on(t.ticketId),
 ]);
 
 export const ticketEvents = pgTable("ticket_events", {

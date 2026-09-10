@@ -100,3 +100,30 @@ nothing was imported (the rows are already in the app's own DB).
 - **Personality**: the persona now mandates the reporter's FIRST NAME in every reply,
   friend-not-bot tone (contractions, situation-specific reactions, no corporate filler),
   and personalises the deterministic nudges and draft lead-in too.
+
+## Inbound email front door (2026-09-10)
+
+Emails now become Iris-triaged, routed tickets — the highest-impact missing feature,
+since the company's issue flow lived in inboxes and a human bridged every email into
+the system by hand.
+
+- **Provider-agnostic webhook** `POST /api/inbound/email` — parses Postmark inbound
+  JSON, SendGrid inbound-parse form posts and plain generic JSON. Protect with
+  `INBOUND_EMAIL_SECRET` (bearer or `?key=`; required in production, 401 otherwise).
+- **Manual path** — the Inbox page (`/inbox`, new nav entry) lists every inbound email
+  and accepts pasted/forwarded emails via `POST /api/inbound`; same pipeline.
+- **Triage on arrival** — classify (LLM when a key is configured, on-device Iris NLU
+  otherwise, labelled honestly in `ai_engine`) → studio extraction → priority floor →
+  enrichment → ticket via the normal routing chain (historic owner hint → department →
+  role → studio → load) → assignee notified → SLA clock starts. Missing facts
+  ("Which studio · When exactly · What has been tried · Who is affected") are computed
+  and recorded on the ticket.
+- **Idempotent** — unique message id: webhook redelivery or a re-paste never raises a
+  second ticket (verified: redelivery resolves to the same ticket id).
+- **Draft reply held for approval** — Iris drafts the reply to the sender (LLM rewrite
+  of a deterministic template; template fallback when no key) and stores it on the
+  ticket. The ticket page gains an "Email reply — Iris drafted, you approve" panel;
+  nothing is ever auto-sent. Sending uses the existing Mailtrap integration and sets
+  `first_response_at`; without mail config the button fails with the exact reason.
+- **Raw email audit** — every payload is stored on `inbound_emails` (migration 0007)
+  with triage status, so a failed triage is retryable, not lost.
