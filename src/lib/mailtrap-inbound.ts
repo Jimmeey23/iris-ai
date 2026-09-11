@@ -47,14 +47,46 @@ export function verifyMailtrapSignature(
   signingSecret: string,
 ): boolean {
   if (!signingSecret || !headerSignature) return false;
-  const expected = createHmac("sha256", signingSecret).update(rawBody, "utf8").digest("hex");
-  const received = headerSignature.trim().toLowerCase();
+  const digest = createHmac("sha256", signingSecret).update(rawBody, "utf8").digest();
+  const received = headerSignature.trim();
+  // Hex is what Mailtrap documents. Base64 is accepted too because providers
+  // change encoding between products and a rejected-but-genuine webhook is
+  // indistinguishable from an attack in the logs. Both are full HMAC
+  // comparisons, so accepting either encoding weakens nothing.
+  return (
+    constantTimeEquals(digest.toString("hex"), received.toLowerCase()) ||
+    constantTimeEquals(digest.toString("base64"), received)
+  );
+}
+
+function constantTimeEquals(expected: string, received: string): boolean {
   const a = Buffer.from(expected, "utf8");
   const b = Buffer.from(received, "utf8");
   // timingSafeEqual throws on a length mismatch, which would itself leak the
   // length — compare lengths first and only then in constant time.
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * Header names Mailtrap has used for the signature across its products. The
+ * documented one is `Mailtrap-Signature`; the Symfony bridge advisory names
+ * `X-Mt-Signature`, so a deployment can plausibly meet either.
+ */
+export const SIGNATURE_HEADERS = [
+  "mailtrap-signature",
+  "x-mailtrap-signature",
+  "x-mt-signature",
+  "mt-signature",
+];
+
+/** The signature header, whichever alias it arrived under. */
+export function readSignatureHeader(headers: Headers): { name: string; value: string } | null {
+  for (const name of SIGNATURE_HEADERS) {
+    const value = headers.get(name);
+    if (value) return { name, value };
+  }
+  return null;
 }
 
 /**

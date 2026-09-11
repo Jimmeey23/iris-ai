@@ -5,6 +5,7 @@ import {
   mailtrapInboundConfig,
   messageToWebhookPayload,
   parseInboundEvents,
+  readSignatureHeader,
   verifyMailtrapSignature,
 } from "@/lib/mailtrap-inbound";
 
@@ -45,7 +46,12 @@ async function handleMailtrap(rawBody: string, signature: string | null) {
     return NextResponse.json({ error: "Mailtrap signing secret not configured" }, { status: 503 });
   }
   if (!verifyMailtrapSignature(rawBody, signature, cfg.signingSecret)) {
-    return NextResponse.json({ error: "Bad signature" }, { status: 401 });
+    // Enough to tell a wrong secret from a mangled body, without printing
+    // either the secret or the signature.
+    console.error(
+      `[inbound] Mailtrap signature mismatch — sig chars=${signature?.trim().length ?? 0}, body bytes=${Buffer.byteLength(rawBody, "utf8")}, secret chars=${cfg.signingSecret.length}`,
+    );
+    return NextResponse.json({ error: "Bad signature", code: "bad_signature" }, { status: 401 });
   }
 
   const events = parseInboundEvents(rawBody);
@@ -90,16 +96,42 @@ async function handleMailtrap(rawBody: string, signature: string | null) {
 
 export async function POST(request: Request) {
   const url = new URL(request.url);
-  const signature = request.headers.get("mailtrap-signature");
+  const signature = readSignatureHeader(request.headers);
 
   // The signature covers the bytes exactly as sent, so the body is read as text
   // once and never re-serialised.
   const rawBody = await request.text().catch(() => "");
 
-  if (signature !== null) return handleMailtrap(rawBody, signature);
+  if (signature) return handleMailtrap(rawBody, signature.value);
+
+  // A body that looks like a Mailtrap event but carried no signature we
+  // recognise is worth naming precisely: silently failing it as "Unauthorized"
+  // sends people hunting for the wrong problem.
+  const looksLikeMailtrap = /"event"\s*:\s*"inbound[._]message_received"/.test(rawBody);
+  if (looksLikeMailtrap) {
+    console.error(
+      `[inbound] Mailtrap-shaped payload with no known signature header. Headers seen: ${[...request.headers.keys()].join(", ")}`,
+    );
+    return NextResponse.json(
+      {
+        error:
+          "Mailtrap event received but no signature header was found. Check the webhook is configured to sign requests.",
+        code: "missing_signature",
+        headersSeen: [...request.headers.keys()],
+      },
+      { status: 401 },
+    );
+  }
 
   if (!authorized(request, url.searchParams.get("key"))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      {
+        error:
+          "Unauthorized. Set INBOUND_EMAIL_SECRET and call with ?key= or a bearer token, or use a signed Mailtrap webhook.",
+        code: "unauthorized",
+      },
+      { status: 401 },
+    );
   }
 
   const contentType = request.headers.get("content-type") ?? "";

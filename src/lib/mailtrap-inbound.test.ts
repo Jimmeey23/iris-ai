@@ -163,3 +163,23 @@ it("falls back to Mailtrap's own id when the message has no RFC id", () => {
   expect(payload.MessageID).toBe("999");
   expect(payload.To).toBe("");
 });
+
+/* ------------------------------------------------------------------ */
+/* Header aliases and encodings                                        */
+/* ------------------------------------------------------------------ */
+
+it("finds the signature under any of the header names Mailtrap uses", async () => {
+  const { readSignatureHeader } = await import("./mailtrap-inbound");
+  for (const name of ["Mailtrap-Signature", "X-Mailtrap-Signature", "x-mt-signature", "MT-Signature"]) {
+    const headers = new Headers({ [name]: "abc" });
+    expect(readSignatureHeader(headers)?.value).toBe("abc");
+  }
+  expect(readSignatureHeader(new Headers({ "content-type": "application/json" }))).toBeNull();
+});
+
+it("accepts a base64 digest as well as hex", () => {
+  const b64 = createHmac("sha256", SECRET).update(PAYLOAD, "utf8").digest("base64");
+  expect(verifyMailtrapSignature(PAYLOAD, b64, SECRET)).toBe(true);
+  // Base64 is case-sensitive, so a mangled one must still fail.
+  expect(verifyMailtrapSignature(PAYLOAD, b64.toLowerCase(), SECRET)).toBe(false);
+});
