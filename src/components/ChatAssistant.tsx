@@ -386,11 +386,13 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const started = useRef(false);
+  const resetPending = useRef(false);
 
   const send = useCallback(
     async (payload: { value?: string; text?: string; label?: string; reset?: boolean }) => {
       setBusy(true);
       setPartial("");
+      resetPending.current = false;
       setStatus(null);
       const echo = payload.text ?? (payload.label && payload.value !== "showall" ? payload.label : null);
       if (echo) {
@@ -466,10 +468,25 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
                 sawServer = true;
                 setStatus((d as { status?: string }).status ?? null);
               },
-              reply_reset: () => setPartial(""),
+              // A pass that pauses for a Momence lookup runs the model again,
+              // so the reply in progress is superseded. Clearing it the moment
+              // the reset arrives leaves the reporter watching their answer
+              // blank out — and if the new pass fails, the text they saw was
+              // discarded for nothing. So the reset is deferred: the old reply
+              // stands until the replacement's first words actually arrive.
+              reply_reset: () => {
+                resetPending.current = true;
+              },
               reply: (d) => {
                 sawServer = true;
-                setPartial((prev) => prev + ((d as { text?: string }).text ?? ""));
+                const text = (d as { text?: string }).text ?? "";
+                if (!text) return;
+                if (resetPending.current) {
+                  resetPending.current = false;
+                  setPartial(text);
+                  return;
+                }
+                setPartial((prev) => prev + text);
               },
               done: (d) => {
                 sawServer = true;

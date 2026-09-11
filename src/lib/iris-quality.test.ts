@@ -503,7 +503,8 @@ it("upgrades the model's own class question to the timetable picker", async () =
     }),
   });
   const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
-  expect(out.messages[0].content).toBe("Which class was worst hit?");
+  // The acknowledgement the reporter watched stream in leads the message.
+  expect(out.messages[0].content).toContain("Which class was worst hit?");
   expect(out.messages[0].picker).toBe("sessions");
   expect(out.state.pendingQuestionId).toBe("sessions");
 });
@@ -713,4 +714,76 @@ it("does not flag a question the reporter actually answered", async () => {
   vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
   const out = await runAgentTurn(state, [], { text: "Anisha taught the FIT class" }, ctx);
   expect(out.state.data.extraDetails?.["Still to confirm"]).toBeUndefined();
+});
+
+/* ------------------------------------------------------------------ */
+/* A thin report is questioned, and the reply the reporter watched      */
+/* stream in is not thrown away                                         */
+/* ------------------------------------------------------------------ */
+
+const thin = "The mic in studio 2 doesn't work";
+
+it("keeps the streamed acknowledgement in front of the question it asked", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      readyForDraft: false,
+      reply: "That's a live one, Jimmeey.",
+      nextQuestion: { id: "custom:symptom", ask: "What exactly is the mic doing?" },
+      slots: { studio: { value: "Kemps Corner" } },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
+  expect(out.messages[0].content).toContain("That's a live one, Jimmeey.");
+  expect(out.messages[0].content).toContain("What exactly is the mic doing?");
+});
+
+it("asks the model's extras in the same breath as its question", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      readyForDraft: false,
+      nextQuestion: { id: "custom:symptom", ask: "What exactly is the mic doing?" },
+      followUps: ["When did it start?", "Has it happened before?"],
+      slots: { studio: { value: "Kemps Corner" } },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
+  expect(out.messages[0].content).toContain("When did it start?");
+  expect(out.messages[0].content).toContain("Has it happened before?");
+});
+
+it("will not let a one-line fault report go straight to the draft", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  // The model decided a one-liner was enough. It is not: the owner cannot tell
+  // what is wrong with the mic, or whether classes are running without it.
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({ slots: { studio: { value: "Kemps Corner" }, impact: { value: "single" }, resolvedNow: { value: false } } }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
+  expect(out.state.step).toBe("agent_q");
+  expect(out.state.pendingQuestionId).toBe("custom:symptom");
+  expect(out.messages[0].options?.length).toBeGreaterThan(2);
+});
+
+it("does not interrogate a short report that already carries the detail", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      slots: {
+        studio: { value: "Kemps Corner" }, impact: { value: "single" }, resolvedNow: { value: false },
+        occurredAt: { value: "This morning" }, actionTaken: { value: "Swapped the batteries" },
+      },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
+  expect(out.state.step).toBe("review");
 });

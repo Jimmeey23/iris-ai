@@ -70,6 +70,13 @@ export type AgentTurn = {
   slots: Record<string, { value: string | boolean | null; quote?: string }>;
   secondaryIssues: AgentIssue[];
   nextQuestion: AgentQuestion | null;
+  /**
+   * Up to two short extras asked alongside `nextQuestion` in the same message.
+   * One question at a time reads as an interrogation when four facts are
+   * missing; a colleague asks "what exactly is it doing, and since when?" in a
+   * breath. The primary question keeps the options/picker — these are prose.
+   */
+  followUps?: string[];
   /** False while the reporter has only greeted us or has not described a reportable matter. */
   reportEstablished?: boolean;
   readyForDraft: boolean;
@@ -213,8 +220,10 @@ Choose the category whose DOMAIN owns the problem, then the best subcategory ins
 - injury, hazard, security → Safety and Security
 
 WHEN TO ASK A QUESTION
-Ask only when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. Ask at most ONE question per turn. When nextQuestion is present, put the entire question only in nextQuestion.ask; reply must contain only a brief acknowledgement, with no question or paraphrase of the ask. The application combines these into one message.
-A detailed report is not the same as a complete one. Going straight to the draft while an owner-critical gap is still open is worse than asking one more question.
+Ask when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. One PRIMARY question per turn, in nextQuestion.ask — that is the one with options or a picker. You may add up to two SHORT extras in alsoAsk, asked in the same breath, when they are the detail that obviously follows. reply carries only a brief acknowledgement, never a question or a paraphrase of the ask. The application combines reply, the ask and the extras into one message.
+A one-line report is almost never a complete one. "The mic in Studio 2 doesn't work" tells the owner nothing they can act on: not what it does (dead / cutting out / distorted / no battery), not whether classes are running without it, not when it started, not whether it has happened before. When a report is this thin, ask — the thinner the report, the more the extras earn their place.
+A detailed report is not the same as a complete one either. Going straight to the draft while an owner-critical gap is still open is worse than asking one more question.
+Give the primary question real options whenever the plausible answers are a short closed set (symptom type, how long, yes/no, who was affected). A tap beats typing for someone standing on a studio floor. Keep allowFreeText true so they can say something you did not list.
 
 Rank the gaps and ask the biggest one first. A reporter who answers three questions and never gets asked the obvious one concludes you were not listening. On an unresolved fault the ordering is almost always: what is being done about the cause → who or how many were affected and what they were offered → the smaller identifying details. Never spend the turn on a name when the cause is still unknown.
 Use the answer you just received. If the reporter tells you a fault is still live, your very next move reflects that: acknowledge it as live, and make your next question or your draft about getting it fixed and about the members sitting in it. Asking for a status and then filing the ticket as though the answer never arrived is the worst thing you can do to them.
@@ -370,7 +379,7 @@ const TERMINAL_TOOLS: LlmToolDef[] = [
   {
     name: "ask_reporter",
     description:
-      "Ask the ONE question that would most change what the owner does. Use only when no lookup can answer it and the answer is genuinely missing.",
+      "Ask the question that would most change what the owner does, plus up to two short related extras in `alsoAsk`. Use only for answers no lookup can supply and that are genuinely missing.",
     parameters: {
       type: "object",
       properties: {
@@ -398,6 +407,13 @@ const TERMINAL_TOOLS: LlmToolDef[] = [
           },
           required: ["id", "ask"],
           additionalProperties: false,
+        },
+        alsoAsk: {
+          type: "array",
+          maxItems: 2,
+          items: { type: "string" },
+          description:
+            "Up to two SHORT extra questions asked in the same breath as `question`, each under 15 words. Use them for the detail that always follows: what exactly is failing, who or what it affected, when it started, whether it has happened before. Omit rather than pad.",
         },
         classification: CLASSIFICATION_OBJ,
         slots: SLOT_ARRAY,
@@ -471,6 +487,7 @@ const TERMINAL_NAMES = new Set(TERMINAL_TOOLS.map((t) => t.name));
 type TerminalArgs = {
   reply?: string;
   question?: AgentQuestion & { options?: { label: string; value: string }[] };
+  alsoAsk?: string[];
   classification?: AgentTurn["classification"];
   slots?: { id: string; value: string; quote?: string }[];
   insight?: AgentInsight;
@@ -523,7 +540,13 @@ function turnFromTerminal(name: string, args: TerminalArgs): AgentTurn {
   if (name === "file_ticket") {
     return { ...base, reportEstablished: true, nextQuestion: null, readyForDraft: true, insight: args.insight };
   }
-  return { ...base, reportEstablished: true, nextQuestion: args.question ?? null, readyForDraft: false };
+  return {
+    ...base,
+    reportEstablished: true,
+    nextQuestion: args.question ?? null,
+    followUps: args.alsoAsk ?? [],
+    readyForDraft: false,
+  };
 }
 
 export type RunAgentOptions = {
@@ -831,6 +854,13 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
       }),
     extraDetails: cleanExtraDetails(raw.extraDetails),
     nextQuestion: readyForDraft || toolCalls.length ? null : nextQuestion,
+    followUps:
+      readyForDraft || toolCalls.length || !nextQuestion
+        ? []
+        : (raw.followUps ?? [])
+            .map((q) => String(q).trim())
+            .filter((q) => q.length > 2 && q !== nextQuestion.ask.trim())
+            .slice(0, 2),
     readyForDraft,
     toolCalls,
     insight: readyForDraft ? raw.insight : undefined,

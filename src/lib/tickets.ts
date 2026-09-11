@@ -7,6 +7,7 @@ import { CATEGORY_DEPARTMENT, CATEGORY_ROLE_PREFERENCE } from "./org";
 import { ownerMatchesHint } from "./issue-knowledge";
 import type { TicketDraft } from "./types";
 import { notifyAssignee } from "./notify";
+import { findSimilarTickets } from "./recurrence";
 
 export const OPEN_STATUSES = ["Open", "In Progress", "Awaiting Info"];
 
@@ -279,7 +280,12 @@ export async function getTicket(id: number) {
         .where(inArray(tickets.id, linkIds))
     : [];
 
-  return { ticket, events, linked };
+  // "Has this happened before?" is the first thing an owner asks of a ticket,
+  // and the answer was previously computed at intake and thrown away. Computed
+  // here instead, so it stays true as later duplicates arrive.
+  const similar = await findSimilarTickets(id);
+
+  return { ticket, events, linked, similar };
 }
 
 export type DashboardStats = {

@@ -10,6 +10,7 @@ import { ticketPermissions } from "@/lib/permissions";
 import { Avatar, CategoryChip, PriorityPill, StatusPill, slaLabel, timeAgo } from "./ui";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import MessageTemplatePanel from "./MessageTemplatePanel";
+import type { SimilarTicket } from "@/lib/recurrence";
 
 function riskTone(v: string) {
   return v === "High" ? "var(--signal)" : v === "Medium" ? "var(--accent)" : "var(--mint)";
@@ -113,11 +114,13 @@ export default function TicketWorkspace({
   events,
   staff,
   linked = [],
+  similar = [],
 }: {
   ticket: Ticket;
   events: TicketEvent[];
   staff: Staff[];
   linked?: LinkedTicket[];
+  similar?: SimilarTicket[];
 }) {
   const router = useRouter();
   const { user } = useUser();
@@ -324,6 +327,39 @@ export default function TicketWorkspace({
                       <span className="chip chip-line text-[10px]">parent</span>
                     )}
                     <span className="text-[11px] txt-3">{l.status}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {similar.length > 0 && (
+          <div className="panel rounded-2xl">
+            <header className="border-b px-5 py-3.5 hairline">
+              <h2 className="serif text-[17px] leading-none txt">Raised before</h2>
+              <p className="mt-0.5 text-[11.5px] txt-3">
+                {similar.length} earlier ticket{similar.length === 1 ? "" : "s"} matched on studio, issue type and what was named
+              </p>
+            </header>
+            <ul className="divide-y hairline">
+              {similar.map((r) => (
+                <li key={r.id}>
+                  <Link
+                    href={`/tickets/${r.id}`}
+                    className="block px-5 py-3 transition hover:bg-[var(--surface-3)]"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11.5px] font-semibold accent-txt">{r.ticketNumber}</span>
+                      <span className="min-w-0 flex-1 truncate text-[12.5px] txt-2">{r.title}</span>
+                      <span className="text-[11px] txt-3">{r.resolvedAt ? `resolved ${r.resolvedAt}` : r.status}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] txt-3">{r.createdAt}</span>
+                      {r.reasons.slice(0, 3).map((reason) => (
+                        <span key={reason} className="chip chip-line !text-[9.5px]">{reason}</span>
+                      ))}
+                    </div>
                   </Link>
                 </li>
               ))}

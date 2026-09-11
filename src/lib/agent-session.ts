@@ -770,14 +770,26 @@ function studioOptions(ctx: EngineContext): ChatOption[] {
  * the actual question in the middle of the card and repeated facts the capture
  * panel already shows. Detected facts belong in that panel, not in the bubble.
  */
+/**
+ * The reporter watches the model's acknowledgement stream in, so throwing it
+ * away and rendering the bare question is experienced as Iris typing one thing
+ * and then replacing it with another. Lead with the words they already saw.
+ */
 function questionMessage(
   q: AgentQuestion,
   s: IntakeState,
   ctx: EngineContext,
   budget: number,
+  lead?: string,
+  followUps: string[] = [],
 ): ChatMessage {
   const options = q.id === "studio" ? studioOptions(ctx) : questionOptions(q);
-  return assistantMessage(q.ask, {
+  const ack = (lead ?? "").trim();
+  const ask = [q.ask, ...followUps.map((f) => f.trim()).filter(Boolean)].join(" ");
+  // A model that ignored the instruction and put the question in `reply` too
+  // must not have it read back twice.
+  const keepAck = ack && !ack.includes("?") && !ask.toLowerCase().includes(ack.toLowerCase());
+  return assistantMessage(keepAck ? `${ack}\n\n${ask}` : ask, {
     options,
     allowFreeText: q.allowFreeText ?? true,
     placeholder: q.placeholder,
@@ -1203,6 +1215,10 @@ export async function runAgentTurn(
 
   const missing = missingRequired(s.data);
   let question = turn.nextQuestion;
+  // Extras belong to the model's own question. If a gate replaces it below,
+  // they are dropped rather than bolted onto a different ask.
+  const modelQuestionId = question?.id;
+  const followUps = turn.followUps ?? [];
   const knownQuestionSlots: Record<string, unknown> = {
     studio: s.data.studioName,
     raisedFor: s.data.raisedFor,
@@ -1404,6 +1420,94 @@ export async function runAgentTurn(
     };
   }
 
+  /* ---------------------------------------------------------------- *
+   * Thin-report gates.                                                *
+   *                                                                   *
+   * "The mic in Studio 2 doesn't work" satisfies every slot gate above *
+   * — studio known, impact guessable, fault obviously unresolved — and *
+   * still tells the owner nothing they can act on. These fill the gap  *
+   * the model left when it decided a one-liner was a complete report:  *
+   * what is actually failing, who it hit, and whether it is new.       *
+   * ---------------------------------------------------------------- */
+  const DETAIL_CATEGORIES = [
+    "Repair and Maintenance", "Tech Issues", "Operating Systems",
+    "Safety and Security", "Class Experience", "Trainer Feedback",
+  ];
+  // Thin means the owner has nothing to act on — not merely short. A brief
+  // report that already carries what was tried, when it happened and how often
+  // is complete, and asking it for more is the interrogation these gates exist
+  // to avoid.
+  // Only facts the reporter actually supplied count. `location` and
+  // `systemAffected` are regex-derivable from the one-liner itself ("the mic in
+  // studio 2" yields both), so counting them would let the thinnest possible
+  // report declare itself complete.
+  const detailCarried = [
+    s.data.actionTaken, s.data.occurredAt, s.data.frequency,
+    s.data.witnesses, s.data.classInfo, s.data.notes, s.data.affectedMembers,
+  ].filter((v) => v !== undefined && v !== "").length;
+  const thinReport = narrative.trim().length < 180 && detailCarried < 2;
+  const budgetLeft = (s.agentAsked?.length ?? 0) < budget;
+  if (!question && thinReport && budgetLeft && DETAIL_CATEGORIES.includes(s.data.category ?? "")) {
+    const detailGates: { id: string; ask: string; why: string; placeholder?: string; options?: ChatOption[] }[] = [
+      {
+        id: "custom:symptom",
+        ask: "What exactly is it doing — is it dead, cutting out, distorted, or something else?",
+        why: "the owner sends a different person depending on the symptom",
+        placeholder: "e.g. cuts out every few minutes",
+        options: [
+          { label: "Completely dead / no power", value: "ans:Completely dead — no power" },
+          { label: "Works intermittently", value: "ans:Works, but cuts out intermittently" },
+          { label: "Works badly / poor quality", value: "ans:Works, but the quality is bad" },
+          { label: "Physically damaged", value: "ans:Physically damaged" },
+        ],
+      },
+      {
+        id: "custom:first_noticed",
+        ask: "When was this first noticed?",
+        why: "it separates a new fault from one that has been running for weeks",
+        placeholder: "e.g. this morning, or about a week ago",
+        options: [
+          { label: "Today", value: "ans:First noticed today" },
+          { label: "In the last few days", value: "ans:First noticed in the last few days" },
+          { label: "A week or more ago", value: "ans:First noticed a week or more ago" },
+          { label: "Not sure", value: "ans:Not sure when it started" },
+        ],
+      },
+      {
+        id: "custom:recurring",
+        ask: "Has this happened before, or is this the first time?",
+        why: "a repeat fault gets replaced rather than patched again",
+        options: [
+          { label: "First time", value: "ans:First time it has happened" },
+          { label: "Happened before", value: "ans:It has happened before" },
+          { label: "Happens regularly", value: "ans:It happens regularly" },
+        ],
+      },
+      {
+        id: "custom:affected",
+        ask: "Were any classes or members affected — and if so, which?",
+        why: "those are the people the owner may need to credit or call",
+        placeholder: "e.g. the 7am Barre, about 12 members",
+        options: [
+          { label: "No classes affected", value: "ans:No classes or members were affected" },
+          { label: "Classes ran, but worse", value: "ans:Classes still ran, but were affected" },
+          { label: "Classes were cancelled", value: "ans:Classes had to be cancelled" },
+        ],
+      },
+    ];
+    const gate = detailGates.find((g) => !(s.agentAsked ?? []).includes(g.id));
+    if (gate) {
+      question = {
+        id: gate.id,
+        ask: gate.ask,
+        why: gate.why,
+        allowFreeText: true,
+        placeholder: gate.placeholder,
+        options: gate.options?.map((o) => ({ label: o.label, value: o.value })),
+      };
+    }
+  }
+
   // Never ask the same thing twice. If the answer did not land the first time,
   // asking again just loops the reporter — take what we have and draft.
   if (question && (s.agentAsked ?? []).includes(question.id)) {
@@ -1425,7 +1529,16 @@ export async function runAgentTurn(
     s.pendingQuestionId = question.id;
     s.agentAsked = [...(s.agentAsked ?? []), question.id];
     s.agentAskLog = [...(s.agentAskLog ?? []), { id: question.id, ask: question.ask }];
-    const messages = [questionMessage(question, s, ctx, budget)];
+    const messages = [
+      questionMessage(
+        question,
+        s,
+        ctx,
+        budget,
+        turn.reply,
+        question.id === modelQuestionId ? followUps : [],
+      ),
+    ];
     return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 
