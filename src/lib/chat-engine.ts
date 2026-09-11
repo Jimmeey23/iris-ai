@@ -58,6 +58,10 @@ export type IntakeData = {
   impact?: string;
   /** Whether the fault is fixed at reporting time — the owner's first question. */
   resolvedNow?: boolean;
+  /** Scheduled work announced in advance, rather than something that broke. */
+  plannedWork?: boolean;
+  /** The window that work covers, in the reporter's words ("From the 14th for 10 days"). */
+  plannedWindow?: string;
   notes?: string;
   frequency?: string;
   actionTaken?: string;

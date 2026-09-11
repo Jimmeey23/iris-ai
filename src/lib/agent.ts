@@ -12,7 +12,7 @@ import type { ChatMessage, ChatOption } from "./types";
 export const CANONICAL_SLOTS = [
   "studio", "raisedFor", "member", "memberContact", "trainer", "classInfo",
   "location", "systemAffected", "membershipRef", "occurredAt", "impact",
-  "atRisk", "resolvedNow", "frequency", "actionTaken", "witnesses", "amount", "notes",
+  "atRisk", "resolvedNow", "plannedWork", "frequency", "actionTaken", "witnesses", "amount", "notes",
   "momenceSessionId", "momenceMemberId",
 ] as const;
 export type CanonicalSlot = (typeof CANONICAL_SLOTS)[number];
@@ -169,6 +169,23 @@ const AGENT_RESPONSE_SCHEMA = {
 /* Prompt                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A small calendar the model can read directly. Handing it "today is the 11th"
+ * and expecting arithmetic is how "the 14th" gets read as a date in the past;
+ * the surrounding days are cheap to compute and remove the guesswork.
+ */
+function calendarBlock(): string {
+  const fmt = (d: Date) =>
+    d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  const now = new Date();
+  const day = (offset: number) => new Date(now.getTime() + offset * 86400000);
+  const upcoming = [1, 2, 3, 4, 5, 6, 7, 10, 14, 21, 30]
+    .map((n) => `+${n}d = ${fmt(day(n))}`)
+    .join(" | ");
+  return `Yesterday = ${fmt(day(-1))} | Today = ${fmt(now)} | Tomorrow = ${fmt(day(1))}
+Upcoming: ${upcoming}`;
+}
+
 function taxonomyBlock(): string {
   return CATEGORIES.map((c) => `${c}: ${TAXONOMY[c].join(", ")}`).join("\n");
 }
@@ -182,6 +199,9 @@ HOW YOU THINK
 - A greeting is not content. "hi", "hello", "hey Iris", "are you there?" carry no facts: they must not appear in a title, a summary, a slot or a quote, and they must not be re-greeted with a second generic opener if you have already welcomed this reporter. If the transcript shows you have already invited them to describe the matter, do not repeat the invitation in different words — say something shorter and human and wait.
 - Read the whole conversation every turn. Facts stated anywhere — including mid-sentence, in passing, or in an earlier answer — are already known. Never ask for them again.
 - NEVER ask about something you are simultaneously recording. Before you write a question, check it against your own slots for this turn: if you are filling a slot with a value, you know it, so the question is dead. If you are genuinely unsure which of several people or classes a fact belongs to, do not fill the slot with a guess and then ask — leave the slot empty and ask, or fill it and stay quiet. Recording "trainer: KV" and asking who taught the class in the same turn destroys the reporter's trust in everything else you say.
+- Separate a PLAN from a FAULT before anything else. "Studio 1 will be closed for renovations from the 14th for 10 days" is an announcement of scheduled work: nothing is broken, nothing needs resolving, and there is no delay, no root cause and no urgency. It is filed so the closure is diarised, the classes in that window are moved and members are told in time. Use the subcategory "Planned Closure / Renovation", set plannedWork=true, capture the exact window, and leave resolvedNow and atRisk unset. A plan only becomes an incident if the reporter says the work overran, was botched, or has hurt someone.
+- The subcategory label is a filing choice you made, NOT a fact about the report. Filing something under "General Maintenance Delays" does not mean there is a delay; filing under "Overcrowding in Class" does not mean a class was full. Never write a question or a summary about a thing that exists only in the label you picked — every word you say back must trace to what the reporter actually wrote.
+- When the reporter pushes back on a premise — "where's the delay?", "nobody said that", "that's not what happened" — they are right and you are wrong. Do not defend it, do not restate it in softer words, and do not carry it into the draft. Say plainly that you had it wrong, put the corrected value in "corrections", and re-classify if the premise was what drove your category.
 - Distinguish ROOT CAUSE from SYMPTOM. If one underlying fault produced several visible problems (a power cut causing no AC, no lights and no music), classify the ticket by the ROOT CAUSE and list the symptoms as secondary issues. Do not file the ticket under the loudest keyword.
 - Read the shape of the fault, not just its name. A detail that narrows the cause is the most valuable thing in the report — if power failed everywhere except one room, that points at an internal circuit rather than the grid, and your rootCause must say so. Generic category statements ("likely deferred maintenance") are worthless to the owner; describe the fault that was actually narrated.
 - Read negation and absence correctly. "no music" is not a music-too-loud complaint; "no AC" is not an AC-too-cold complaint.
@@ -207,6 +227,7 @@ WHAT EACH SLOT MEANS — keep them distinct, they land in different ticket field
 - systemAffected: a device, platform or piece of equipment ("Momence", "POS", "speaker system", "Wi-Fi"). A room is NOT a system.
 - impact: ALWAYS fill it — safety | many | single | suggestion.
 - atRisk: true only when a person is in danger RIGHT NOW or the hazard is live and unguarded. A fault that could hurt someone later is not atRisk.
+- plannedWork: true when the report announces work scheduled for the future rather than something already wrong. Mutually exclusive with a live fault.
 - resolvedNow: fill it only when known — true when fixed or stopped, false when confirmed still happening. Unknown is neither false nor resolved; ask when current status changes the required action.
 - membershipRef: the product the member holds or bought — "20-class pack", "annual membership", "trial". Fill it whenever one is named, even in passing. Prefer the real product name from a member lookup over the reporter's shorthand.
 - frequency: first time, repeat, or chronic.
@@ -319,6 +340,8 @@ Return STRICT JSON only, matching this shape exactly:
 
 Rules for the JSON:
 - Slot ids you may use: ${CANONICAL_SLOTS.join(", ")} — plus any "custom:<key>".
+- "plannedWork" is true only for work announced before it starts. When it is true, leave "resolvedNow" and "atRisk" unset and put the window in "occurredAt" as a plain phrase ("From 14 Sept for 10 days").
+- "atRisk" is for a person in danger RIGHT NOW. Scheduled work, an inconvenience, a closure and a cost are never atRisk. Setting it forces the highest severity and the tightest response clock in the system, so if you cannot point at the words describing the danger, leave it false.
 - "impact" must be one of: safety, many, single, suggestion. Base it on the count you were actually told: one attendee is "single" however disruptive the fault was, and an unknown count is a reason to ask, not a reason to write "many". Judge the fault's severity through priority and urgencyScore, not by inflating impact.
 - "effort" is what it takes to FIX THE CAUSE, not what the team did on the floor to get through the class. A workaround is never evidence of low effort, and anything needing a vendor, the landlord or the building team is at least Medium.
 - "atRisk" must be boolean.
@@ -393,6 +416,8 @@ REPORTER: ${ctx.reporter.name}, ${ctx.reporter.role}
 
 CURRENT DATE AND TIME: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "full", timeStyle: "short" })} IST
 Resolve words such as today, yesterday, this morning and last night against this timestamp.
+${calendarBlock()}
+A bare day number ("the 14th", "on the 3rd") means the NEXT occurrence of that day when the report is about something upcoming, and the most recent one when it is about something that already happened. Work out which from the tense the reporter used: "will be closed", "is scheduled", "starts" are future; "was", "went down", "happened" are past. Resolve the date before you classify, and say the resolved date back to the reporter so they can catch you if you got it wrong.
 
 ALREADY KNOWN (do not ask about any of these; [human-set] values are the reporter's own choices — never overwrite them without an explicit correction):
 ${knownLines || "- nothing yet"}

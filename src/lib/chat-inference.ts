@@ -34,6 +34,56 @@ export function extractTimes(text: string): string[] {
   return [...new Set(out)];
 }
 
+/* ------------------------------------------------------------------ */
+/* Planned work vs a live fault                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Scheduled work announced in advance — a renovation, a planned closure, a
+ * shutdown with a start date. It is NOT a fault, and treating it as one is how
+ * a renovation starting in three days becomes a Critical ticket with a
+ * fifteen-minute response target and a question about whether it is "resolved
+ * yet". Nothing here is broken; the studio is telling the business a plan.
+ *
+ * A plan marker on its own is not enough: "BBB scheduled at 10 am" is a
+ * timetable statement, not a renovation notice. A report only counts as planned
+ * work when a forward-looking marker sits alongside an actual work-or-closure
+ * noun, and nothing in it says something is already broken.
+ */
+const PLAN_MARKER =
+  /\b(?:will be|will start|will begin|will commence|going to be|due to be|to be|is being|are being|planned|scheduled|upcoming|from the \d{1,2}(?:st|nd|rd|th)?|starting|starts on|commencing|w\.e\.f\.?)\b/i;
+
+const WORK_NOUN =
+  /\b(?:closed|closure|closing|shut|shutdown|unavailable|out of (?:use|action)|renovat\w*|refurbish\w*|remodel\w*|upgrade[sd]?|servicing|maintenance work|deep clean|repaint\w*|construction|fit-?out)\b/i;
+
+/** A fault already happening beats any planned-sounding wording. */
+const LIVE_FAULT =
+  /\b(?:is|are|has been|have been)\s+(?:not working|broken|down|leaking|stuck|dead|out)\b|\b(?:stopped|failed|broke|tripped|burst|flooded|went (?:out|down))\b|\bthere (?:was|is) no\b|\bhad no\b|\bright now\b|\bcurrently\b|\bstill (?:out|down|broken|not)\b/i;
+
+/**
+ * The window the work covers, in the reporter's own words — "from the 14th for
+ * 10 days". The owner needs the dates far more than they need a severity score.
+ */
+// The optional month word must not swallow a connective: without the lookahead
+// "from the 14th for 10 days" captures "14th for" and loses the duration.
+const NOT_CONNECTIVE = String.raw`(?!for\b|to\b|and\b|until\b|till\b|onwards\b)`;
+const PLANNED_WINDOW = new RegExp(
+  String.raw`\b(?:from|starting|starts|beginning|commencing|w\.e\.f\.?)\s+(?:the\s+)?` +
+    String.raw`([0-9]{1,2}(?:st|nd|rd|th)?(?:\s+${NOT_CONNECTIVE}[A-Za-z]+)?|[A-Za-z]+\s+[0-9]{1,2}(?:st|nd|rd|th)?)\b` +
+    String.raw`(?:[^.]*?\bfor\s+([0-9]+\s*(?:day|week|month)s?))?`,
+  "i",
+);
+
+export function detectPlannedWork(text: string): { planned: boolean; window?: string } {
+  if (LIVE_FAULT.test(text)) return { planned: false };
+  if (!PLAN_MARKER.test(text) || !WORK_NOUN.test(text)) return { planned: false };
+  const m = text.match(PLANNED_WINDOW);
+  const from = m?.[1]?.trim();
+  const duration = m?.[2]?.trim();
+  const window = from ? `From ${from}${duration ? ` for ${duration}` : ""}` : undefined;
+  return { planned: true, window };
+}
+
 /**
  * Rooms that read like class names. "Strength Lab" is a space you move a class
  * INTO, so listing it as a class affected by an outage is simply wrong — it was
@@ -251,6 +301,17 @@ export function inferFromText(text: string, s: IntakeState, ctx: EngineContext):
             : formats.join(", ");
       d.classInfo = value;
       note(`Class · ${d.classInfo}`);
+    }
+  }
+  if (d.plannedWork === undefined) {
+    const planned = detectPlannedWork(text);
+    if (planned.planned) {
+      d.plannedWork = true;
+      note("Planned work · Scheduled in advance");
+      if (planned.window && d.plannedWindow === undefined) {
+        d.plannedWindow = planned.window;
+        note(`Window · ${planned.window}`);
+      }
     }
   }
   if (d.atRisk === undefined) {

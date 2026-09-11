@@ -135,6 +135,8 @@ export function computeSla(input: {
   atRisk?: boolean;
   /** True when confirmed fixed, false when confirmed still happening, undefined when unknown. */
   resolvedNow?: boolean;
+  /** Scheduled work announced in advance — a plan to diarise, not a fault to fix. */
+  plannedWork?: boolean;
   overrides?: SlaOverrides;
 }): SlaResult {
   const policy = basePolicy(input.category, input.subcategory, input.overrides);
@@ -173,6 +175,14 @@ export function computeSla(input: {
   if (input.resolvedNow === false) {
     sevIndex = Math.max(sevIndex, 2);
     reasons.push("still unresolved at time of report");
+  }
+
+  // Scheduled work is diarised, not scrambled on. Unless a genuine hazard is
+  // flagged it cannot exceed Moderate, so a renovation notice never lands on an
+  // owner's screen with the same clock as a live outage.
+  if (input.plannedWork && !input.atRisk && input.impact !== "safety") {
+    sevIndex = Math.min(sevIndex, 1);
+    reasons.push("scheduled work, not an incident");
   }
 
   const severity = SEVERITIES[Math.max(0, Math.min(3, sevIndex))];

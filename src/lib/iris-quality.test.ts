@@ -370,6 +370,103 @@ it("marks regex-extracted facts as the machine's reading, not the reporter's wor
 });
 
 /* ------------------------------------------------------------------ */
+/* Scheduled work is not an incident                                    */
+/* ------------------------------------------------------------------ */
+
+const renovation =
+  "Studio 1 at Bandra will be closed for renovations to the Strength Lab from the 14th for 10 days.";
+
+it("recognises announced work as planned, with its window", async () => {
+  const { detectPlannedWork } = await import("./chat-inference");
+  const got = detectPlannedWork(renovation);
+  expect(got.planned).toBe(true);
+  expect(got.window).toBe("From 14th for 10 days");
+});
+
+it("does not mistake a timetable mention for planned work", async () => {
+  const { detectPlannedWork } = await import("./chat-inference");
+  // "BBB scheduled at 10 am" is a class, not a renovation notice.
+  expect(detectPlannedWork(outage).planned).toBe(false);
+  expect(detectPlannedWork("the 6pm class is scheduled as usual").planned).toBe(false);
+});
+
+it("treats a live fault as a fault even when it mentions upcoming work", async () => {
+  const { detectPlannedWork } = await import("./chat-inference");
+  expect(
+    detectPlannedWork("the AC is not working and a replacement is scheduled for the 20th").planned,
+  ).toBe(false);
+});
+
+it("does not let scheduled work become a Critical, minutes-to-respond ticket", () => {
+  const ai = localEnrich({
+    text: renovation,
+    category: "Repair and Maintenance",
+    subcategory: "Planned Closure / Renovation",
+    studioName: "Supreme HQ, Bandra",
+    impact: "many",
+    plannedWork: true,
+  });
+  expect(ai.priority).not.toBe("Critical");
+  expect(ai.urgencyScore).toBeLessThan(70);
+  expect(ai.severity).not.toBe("Severe");
+  expect(ai.slaRespondHours).toBeGreaterThanOrEqual(1);
+});
+
+it("does not describe planned work as a fault or as unresolved", () => {
+  const ai = localEnrich({
+    text: renovation,
+    category: "Repair and Maintenance",
+    subcategory: "Planned Closure / Renovation",
+    studioName: "Supreme HQ, Bandra",
+    plannedWork: true,
+  });
+  expect(ai.rootCause).not.toMatch(/deferred preventive maintenance/i);
+  expect(ai.rootCause).toMatch(/no fault to diagnose/i);
+  expect(ai.title).not.toMatch(/unresolved/i);
+});
+
+it("still escalates planned work when a real hazard is described", () => {
+  const ai = localEnrich({
+    text: "Renovation starts on the 14th and there is an exposed live wire on the floor right now",
+    category: "Repair and Maintenance",
+    subcategory: "Planned Closure / Renovation",
+    plannedWork: true,
+    atRisk: true,
+  });
+  expect(["High", "Critical"]).toContain(ai.priority);
+});
+
+it("drops a live-risk claim that nothing in the report supports", async () => {
+  const { enforceAtRisk } = await import("./guardrails");
+  expect(enforceAtRisk(true, renovation)).toBeUndefined();
+  expect(enforceAtRisk(true, "a member slipped and hurt her wrist")).toBe(true);
+  // Never invents risk where the model said there was none.
+  expect(enforceAtRisk(false, "a member slipped")).toBe(false);
+});
+
+it("does not ask whether scheduled work is resolved yet", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      classification: {
+        category: "Repair and Maintenance",
+        subcategory: "Planned Closure / Renovation",
+        confidence: 0.9,
+        alternates: [],
+      },
+      slots: { studio: { value: "Bandra" }, raisedFor: { value: "Noticed by staff" } },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: renovation }, ctx);
+  expect(out.state.data.plannedWork).toBe(true);
+  expect(out.state.data.plannedWindow).toBe("From 14th for 10 days");
+  const asked = (out.state.agentAskLog ?? []).map((a) => a.ask).join(" ");
+  expect(asked).not.toMatch(/resolved|still happening/i);
+});
+
+/* ------------------------------------------------------------------ */
 /* Momence pickers replace guessing                                     */
 /* ------------------------------------------------------------------ */
 

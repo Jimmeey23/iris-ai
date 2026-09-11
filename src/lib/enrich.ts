@@ -3,7 +3,7 @@ import { CATEGORIES, TAXONOMY, type Priority } from "./taxonomy";
 import { computeSla, type Severity, type SlaOverrides } from "./sla";
 import { getOpenAiKey, getSetting } from "./settings";
 import { chatJson, modelFor } from "./llm";
-import { enforcePriority, enforceUrgency } from "./guardrails";
+import { enforceAtRisk, enforcePriority, enforceUrgency, plannedWorkCeiling } from "./guardrails";
 import type { AgentInsight } from "./agent";
 
 /** Reads the admin-configured category-level SLA overrides, if any are saved. */
@@ -98,6 +98,7 @@ function composeTitle(input: {
   studioName?: string;
   classInfo?: string;
   resolvedNow?: boolean;
+  plannedWork?: boolean;
 }): string {
   const clean = stripPreamble(input.text ?? "");
   const place =
@@ -118,7 +119,9 @@ function composeTitle(input: {
   const classes = input.classInfo ? countDistinctTimes(input.classInfo) : 0;
   const times = classes || countDistinctTimes(clean);
   if (times >= 2) scope.push(`${times} classes affected`);
-  if (input.resolvedNow === false) scope.push("still unresolved");
+  // "still unresolved" is nonsense about work that has not started yet.
+  if (input.plannedWork) scope.push("scheduled");
+  else if (input.resolvedNow === false) scope.push("still unresolved");
 
   const label = `${input.subcategory}${place}`;
   return scope.length ? `${label} (${scope.join(", ")})` : label;
@@ -136,16 +139,32 @@ export function localEnrich(input: {
   trainerName?: string;
   classInfo?: string;
   resolvedNow?: boolean;
+  plannedWork?: boolean;
   slaOverrides?: SlaOverrides;
 }): AiInsight {
   const text = input.text || `${input.subcategory} at ${input.studioName ?? "studio"}`;
   const sentiment = detectSentiment(text);
-  const { priority, reason } = detectPriority({
+  // A live-risk claim with no hazard in the report is not evidence.
+  const atRisk = enforceAtRisk(input.atRisk, text);
+  // Scheduled work has no "still happening" state to compress the clock with —
+  // nothing is broken yet, so the live-fault path must not apply to it.
+  const resolvedNow = input.plannedWork ? undefined : input.resolvedNow;
+  const detected = detectPriority({
     text,
     category: input.category,
     impact: input.impact,
-    atRisk: input.atRisk,
+    atRisk,
   });
+  const ceiling = plannedWorkCeiling(detected.priority, {
+    plannedWork: input.plannedWork,
+    atRisk,
+    impact: input.impact,
+    text,
+  });
+  const priority = ceiling.priority;
+  const reason = ceiling.capped
+    ? `${detected.reason} · capped at Medium: scheduled work, not an incident`
+    : detected.reason;
 
   const emotion = EMOTION_RULES.find((r) => r.test.test(text))?.emotion ??
     (sentiment === "Negative" ? "Dissatisfied" : sentiment === "Positive" ? "Delighted" : "Informational");
@@ -157,8 +176,8 @@ export function localEnrich(input: {
   if (input.impact === "suggestion") urgencyScore = Math.max(10, urgencyScore - 12);
   // A fault the reporter has confirmed is STILL happening is live work, not a
   // write-up. Confirmed-resolved earns the opposite nudge.
-  if (input.resolvedNow === false) urgencyScore = Math.min(99, urgencyScore + 6);
-  else if (input.resolvedNow === true) urgencyScore = Math.max(10, urgencyScore - 8);
+  if (resolvedNow === false) urgencyScore = Math.min(99, urgencyScore + 6);
+  else if (resolvedNow === true) urgencyScore = Math.max(10, urgencyScore - 8);
 
   const churnRisk: AiInsight["churnRisk"] = CHURN_SIGNALS.test(text)
     ? "High"
@@ -171,13 +190,13 @@ export function localEnrich(input: {
   // fix. An unresolved fault, or one that needs a third party, is not Low.
   const effort: AiInsight["effort"] = EFFORT_HIGH.test(text)
     ? "High"
-    : input.resolvedNow === false || THIRD_PARTY.test(text)
+    : resolvedNow === false || THIRD_PARTY.test(text)
       ? "Medium"
       : EFFORT_LOW.test(text)
         ? "Low"
         : "Medium";
 
-  const rootCause = deriveRootCause(input.category, input.subcategory, text);
+  const rootCause = deriveRootCause(input.category, input.subcategory, text, input.plannedWork);
   const suggestedAction = deriveAction(input.category, input.subcategory, input.memberName);
 
   const subject = [
@@ -196,8 +215,9 @@ export function localEnrich(input: {
     churnRisk,
     sentiment,
     impact: input.impact,
-    atRisk: input.atRisk,
-    resolvedNow: input.resolvedNow,
+    atRisk: atRisk,
+    resolvedNow,
+    plannedWork: input.plannedWork,
     overrides: input.slaOverrides,
   });
 
@@ -212,7 +232,8 @@ export function localEnrich(input: {
       subcategory: input.subcategory,
       studioName: input.studioName,
       classInfo: input.classInfo,
-      resolvedNow: input.resolvedNow,
+      resolvedNow,
+      plannedWork: input.plannedWork,
     }),
     summary: `${subject}.${who}${trainer} Tone reads ${sentiment.toLowerCase()} (${emotion.toLowerCase()}); ${priority.toLowerCase()} priority with ${effort.toLowerCase()} expected effort.`,
     sentiment,
@@ -255,7 +276,13 @@ const ROOT_CAUSE_SIGNALS: { test: RegExp; cause: string }[] = [
   { test: /(injur|slip|fell|fainted|bled|sprain)/i, cause: "Member injured during activity — establish whether cause was equipment, surface, instruction or a pre-existing condition." },
 ];
 
-function deriveRootCause(category: string, subcategory: string, text = ""): string {
+function deriveRootCause(category: string, subcategory: string, text = "", plannedWork = false): string {
+  // Scheduled work is not a fault, so it has no root cause to diagnose. Saying
+  // "likely deferred preventive maintenance" about a planned renovation is
+  // both wrong and insulting to the person who planned it.
+  if (plannedWork) {
+    return `${subcategory}: Planned work notified in advance — no fault to diagnose. The ticket exists so the closure is scheduled, classes are moved and members are told in good time.`;
+  }
   const signal = ROOT_CAUSE_SIGNALS.find((r) => r.test.test(text));
   if (signal) return `${subcategory}: ${signal.cause}`;
   const map: Record<string, string> = {
@@ -336,6 +363,7 @@ export async function aiEnrich(input: {
   classInfo?: string;
   membershipRef?: string;
   resolvedNow?: boolean;
+  plannedWork?: boolean;
 }): Promise<AiInsight> {
   const slaOverrides = await getSlaOverrides();
   const base = localEnrich({ ...input, slaOverrides });
@@ -497,6 +525,7 @@ export async function insightFromAgent(input: {
   trainerName?: string;
   classInfo?: string;
   resolvedNow?: boolean;
+  plannedWork?: boolean;
   model?: string;
   confidence?: number;
 }): Promise<AiInsight> {
@@ -511,7 +540,22 @@ export async function insightFromAgent(input: {
     ? (a.sentiment as AiInsight["sentiment"])
     : base.sentiment;
 
-  const { priority, reason } = enforcePriority(a.priority, input.text, a.priorityReason);
+  // The model's own escalation gets the same scrutiny as the on-device one: a
+  // live-risk claim needs a hazard in the report, and scheduled work with no
+  // hazard cannot be Critical however urgent the model felt about it.
+  const atRisk = enforceAtRisk(input.atRisk, input.text);
+  const resolvedNow = input.plannedWork ? undefined : input.resolvedNow;
+  const raised = enforcePriority(a.priority, input.text, a.priorityReason);
+  const ceiling = plannedWorkCeiling(raised.priority, {
+    plannedWork: input.plannedWork,
+    atRisk,
+    impact: input.impact,
+    text: input.text,
+  });
+  const priority = ceiling.priority;
+  const reason = ceiling.capped
+    ? `${raised.reason} · capped at Medium: scheduled work, not an incident`
+    : raised.reason;
   const provisionalUrgency = enforceUrgency(a.urgencyScore, priority);
 
   const churnRisk = (["Low", "Medium", "High"] as const).includes(a.churnRisk as never)
@@ -528,14 +572,18 @@ export async function insightFromAgent(input: {
     churnRisk,
     sentiment,
     impact: input.impact,
-    atRisk: input.atRisk,
-    resolvedNow: input.resolvedNow,
+    atRisk,
+    resolvedNow,
+    plannedWork: input.plannedWork,
     overrides: slaOverrides,
   });
 
   // SLA may only escalate priority further, never soften the guardrail floor.
   const order: Priority[] = ["Low", "Medium", "High", "Critical"];
-  const finalPriority = order[Math.max(order.indexOf(priority), order.indexOf(sla.priority))];
+  const finalPriority = plannedWorkCeiling(
+    order[Math.max(order.indexOf(priority), order.indexOf(sla.priority))],
+    { plannedWork: input.plannedWork, atRisk, impact: input.impact, text: input.text },
+  ).priority;
   // Re-band against the priority that actually ships, or a ticket can read
   // "High" next to an urgency of 35.
   const urgencyScore = enforceUrgency(provisionalUrgency, finalPriority);

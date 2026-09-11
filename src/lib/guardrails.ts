@@ -47,6 +47,45 @@ export function enforcePriority(
   return { priority: candidate, reason: reasonIn ?? "model assessment" };
 }
 
+/**
+ * Hazard wording that can justify "someone is at risk right now".
+ *
+ * The model is capable of asserting atRisk on a report where nothing is wrong
+ * — a renovation scheduled for next week, say — and atRisk is the strongest
+ * escalation in the system: it forces Severe severity and the tightest
+ * response clock. A live-danger claim therefore has to be backed by live-danger
+ * words somewhere in the report.
+ */
+const HAZARD_SIGNAL =
+  /\b(injur|hurt|bleed|faint|unconscious|collaps|trapped|fire|smoke|burn|shock|electrocut|exposed wire|live wire|gas leak|flood|slip|fell|falling|glass|sharp|blocked exit|fire exit|harass|assault|threat|intruder|unsafe|hazard|danger)/i;
+
+/**
+ * Downgrade an unsupported live-risk claim. Never upgrades: a reporter who
+ * pressed the risk button is trusted, and only a machine guess is questioned.
+ */
+export function enforceAtRisk(proposed: boolean | undefined, text: string): boolean | undefined {
+  if (proposed !== true) return proposed;
+  return HAZARD_SIGNAL.test(text) ? true : undefined;
+}
+
+/**
+ * Scheduled work is not an incident. Announcing a renovation three days out is
+ * information the business needs, not something to be resolved inside the hour,
+ * so a planned report with no hazard cannot outrank Medium however urgent the
+ * model felt. A real hazard inside planned work (a live wire on site) still
+ * escalates through the normal path.
+ */
+export function plannedWorkCeiling(
+  priority: Priority,
+  input: { plannedWork?: boolean; atRisk?: boolean; impact?: string; text: string },
+): { priority: Priority; capped: boolean } {
+  const hazardous = input.atRisk === true || input.impact === "safety" || HAZARD_SIGNAL.test(input.text);
+  if (!input.plannedWork || hazardous) return { priority, capped: false };
+  const ceiling: Priority = "Medium";
+  if (PRIORITIES.indexOf(priority) <= PRIORITIES.indexOf(ceiling)) return { priority, capped: false };
+  return { priority: ceiling, capped: true };
+}
+
 /** Urgency score must track the enforced priority, not drift from it. */
 export function enforceUrgency(score: number | undefined, priority: Priority): number {
   const floorByPriority: Record<Priority, number> = { Critical: 85, High: 65, Medium: 35, Low: 5 };

@@ -114,6 +114,7 @@ export const TAXONOMY: Record<string, string[]> = {
     "Towel Availability Issues",
     "Plumbing Leaks",
     "General Maintenance Delays",
+    "Planned Closure / Renovation",
     "Uncomfortable Lounge Seating",
     "Air Fresheners Too Strong",
     "Music System Too Loud/Low",

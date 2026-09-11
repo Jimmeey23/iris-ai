@@ -139,6 +139,7 @@ function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
       break;
     }
     case "atRisk": d.atRisk = /^(yes|true)/i.test(v); break;
+    case "plannedWork": d.plannedWork = /^(yes|true)/i.test(v); break;
     case "frequency": d.frequency = v; break;
     case "occurredAt": d.occurredAt = v; break;
     case "location": d.location = v; break;
@@ -481,6 +482,19 @@ function applySlots(
         if (locked("atRisk")) break;
         d.atRisk = v === true || /^(true|yes)$/i.test(str);
         break;
+      case "plannedWork": {
+        if (locked("plannedWork")) break;
+        const isPlanned = v === true || /^(true|yes)$/i.test(str);
+        d.plannedWork = isPlanned;
+        // Scheduled work has no live state. Clearing these stops a stale
+        // "still happening" from an earlier turn compressing the SLA clock on
+        // a ticket about work that has not started.
+        if (isPlanned) {
+          d.resolvedNow = undefined;
+          d.atRisk = undefined;
+        }
+        break;
+      }
       case "resolvedNow": {
         if (locked("resolvedNow")) break;
         if (typeof v === "boolean") d.resolvedNow = v;
@@ -1250,10 +1264,16 @@ export async function runAgentTurn(
     // Studio drives routing — it overrides whatever the model asked this turn.
     question = { id: "studio", ask: GATE_ASK.studio, allowFreeText: false };
   } else if (!question) {
-    const operationalFault = [
-      "Repair and Maintenance", "Tech Issues", "Operating Systems",
-      "Safety and Security", "Class Experience",
-    ].includes(s.data.category ?? "");
+    // "Is this resolved now, or still happening?" is a question about a fault.
+    // Asked about a renovation that starts next week it is nonsense, and it is
+    // the reporter's first impression of how well Iris read them. Scheduled
+    // work is never an operational fault.
+    const operationalFault =
+      !s.data.plannedWork &&
+      [
+        "Repair and Maintenance", "Tech Issues", "Operating Systems",
+        "Safety and Security", "Class Experience",
+      ].includes(s.data.category ?? "");
     // Impact is deliberately NOT gated here when Momence can answer it: the
     // roster of the affected sessions gives a real count, so asking the
     // reporter to characterise the blast radius first is a worse question. It
@@ -1278,6 +1298,23 @@ export async function runAgentTurn(
       };
       break;
     }
+  }
+
+  // Scheduled work has its own owner-critical gap, and it is not "is it fixed":
+  // it is when, and whether the classes in that window have been dealt with.
+  if (
+    !question &&
+    s.data.plannedWork &&
+    !s.data.plannedWindow &&
+    !(s.agentAsked ?? []).includes("custom:planned_window")
+  ) {
+    question = {
+      id: "custom:planned_window",
+      ask: "What are the exact dates — when does it start, and how long is it out for?",
+      why: "the owner needs the window to move classes and tell members before it starts",
+      allowFreeText: true,
+      placeholder: "e.g. 14 Sept for 10 days",
+    };
   }
 
   // When Momence can answer "which classes" and "who was in them", asking the
