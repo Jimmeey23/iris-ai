@@ -370,7 +370,11 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const [context, setContext] = useState<ComposerContext>({});
   const [dense, setDense] = useState(false);
   const [botSays, setBotSays] = useState<string | null>(null);
-  const [showPicker, setShowPicker] = useState(true);
+  // Which assistant message the lookup panel has been dismissed for. Keyed by
+  // message id rather than a bare boolean so that picking an answer collapses
+  // the panel, while the NEXT question that needs a picker opens a fresh one
+  // on its own — no effect required to reset it.
+  const [pickerDismissedFor, setPickerDismissedFor] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [stickBottom, setStickBottom] = useState(true);
@@ -605,6 +609,8 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
   const placeholder = lastAssistant?.placeholder ?? "Type your message…";
   const remaining = lastAssistant?.remaining ?? 0;
   const activePicker = step === "created" ? undefined : lastAssistant?.picker;
+  const showPicker = Boolean(lastAssistant?.id) && pickerDismissedFor !== lastAssistant?.id;
+  const dismissPicker = () => setPickerDismissedFor(lastAssistant?.id ?? null);
   const mood: "idle" | "thinking" | "happy" | "alert" | "listening" = busy
     ? "thinking"
     : step === "created"
@@ -855,7 +861,7 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
                 <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] accent-txt">
                   {activePicker === "membership" ? "Membership catalogue" : "Momence lookup"}
                 </span>
-                <button onClick={() => setShowPicker(false)} className="text-[10px] txt-3 hover:txt">
+                <button onClick={dismissPicker} className="text-[10px] txt-3 hover:txt">
                   hide
                 </button>
               </div>
@@ -871,11 +877,13 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
                       : []
                 }
                 onPick={(r) => {
-                  setShowPicker(true);
+                  // The choice is made — collapse the search rather than leave
+                  // a stale result list sitting over the conversation.
+                  dismissPicker();
                   void send({ value: r.value, label: r.label });
                 }}
                 onConfirm={(rs) => {
-                  setShowPicker(true);
+                  dismissPicker();
                   // One message carries the whole selection, so a multi-class
                   // incident is confirmed in a single turn rather than one
                   // question per class.
@@ -899,7 +907,7 @@ export default function ChatAssistant({ studios }: { studios: Studio[] }) {
             </div>
           )}
           {activePicker && !showPicker && (
-            <button onClick={() => setShowPicker(true)} className="btn btn-ghost mb-2 !py-1 !text-[11px]">
+            <button onClick={() => setPickerDismissedFor(null)} className="btn btn-ghost mb-2 !py-1 !text-[11px]">
               Show Momence lookup
             </button>
           )}
