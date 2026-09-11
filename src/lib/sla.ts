@@ -173,8 +173,17 @@ export function computeSla(input: {
   // it up on the same clock as a fault already fixed is the single most
   // misleading thing this function can do.
   if (input.resolvedNow === false) {
-    sevIndex = Math.max(sevIndex, 2);
-    reasons.push("still unresolved at time of report");
+    // ...but "live" is not the same as "big". A fault the reporter has told us
+    // affects one machine or one member stays Moderate — otherwise every
+    // unresolved report in the system is Major, and Major stops meaning
+    // anything. The tight respond clock below still applies either way.
+    const narrow = input.impact === "single" || input.impact === "suggestion";
+    sevIndex = narrow ? Math.max(sevIndex, 1) : Math.max(sevIndex, 2);
+    reasons.push(
+      narrow
+        ? "still unresolved, but limited to a single member or item"
+        : "still unresolved at time of report",
+    );
   }
 
   // Scheduled work is diarised, not scrambled on. Unless a genuine hazard is

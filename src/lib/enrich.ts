@@ -94,13 +94,20 @@ function countDistinctTimes(text: string): number {
  */
 function composeTitle(input: {
   text: string;
+  /** The reporter's opening description, before any answers were appended. */
+  opening?: string;
   subcategory: string;
   studioName?: string;
   classInfo?: string;
   resolvedNow?: boolean;
   plannedWork?: boolean;
 }): string {
-  const clean = stripPreamble(input.text ?? "");
+  // Titles are built from the report, not from the report plus every answer
+  // that followed it. Joining "the washing machine stopped working" to
+  // "Kwality House, Kemps Corner" and "Still happening" produces a run-on that
+  // no headline rule can match, so the title fell back to the subcategory
+  // label — a filing choice masquerading as a description of the problem.
+  const clean = stripPreamble(input.opening?.trim() || input.text || "");
   const place =
     input.studioName && input.studioName !== "Not studio specific"
       ? ` — ${input.studioName.split(",")[0].trim()}`
@@ -117,7 +124,7 @@ function composeTitle(input: {
 
   const scope: string[] = [];
   const classes = input.classInfo ? countDistinctTimes(input.classInfo) : 0;
-  const times = classes || countDistinctTimes(clean);
+  const times = classes || countDistinctTimes(stripPreamble(input.text ?? ""));
   if (times >= 2) scope.push(`${times} classes affected`);
   // "still unresolved" is nonsense about work that has not started yet.
   if (input.plannedWork) scope.push("scheduled");
@@ -130,6 +137,8 @@ function composeTitle(input: {
 /** Deterministic on-device enrichment — always available, no API key required. */
 export function localEnrich(input: {
   text: string;
+  /** The reporter's first substantive message, used for the title. */
+  opening?: string;
   category: string;
   subcategory: string;
   impact?: string;
@@ -229,6 +238,7 @@ export function localEnrich(input: {
     slaReason: sla.reason,
     title: composeTitle({
       text: input.text,
+      opening: input.opening,
       subcategory: input.subcategory,
       studioName: input.studioName,
       classInfo: input.classInfo,
@@ -516,6 +526,7 @@ export function quickClassify(text: string) {
 export async function insightFromAgent(input: {
   agent?: AgentInsight;
   text: string;
+  opening?: string;
   category: string;
   subcategory: string;
   impact?: string;

@@ -180,6 +180,9 @@ const IMPACT_PRIORITY: Record<string, Priority> = {
   suggestion: "Low",
 };
 
+/** Fault words that say something is wrong, but nothing about how badly. */
+const GENERIC_FAULT_WORDS = new Set(["not working", "broken", "down", "leak"]);
+
 export function detectPriority(input: {
   text: string;
   category: string;
@@ -195,10 +198,15 @@ export function detectPriority(input: {
   score = order.indexOf(catDefault);
   reasons.push(`${input.category} baseline is ${catDefault}`);
 
-  if (input.impact && IMPACT_PRIORITY[input.impact]) {
-    const impactScore = order.indexOf(IMPACT_PRIORITY[input.impact]);
-    score = Math.max(score, impactScore);
-    if (impactScore >= order.indexOf(catDefault)) reasons.push("stated business impact");
+  // A stated blast radius REPLACES the category baseline rather than being
+  // max'ed with it. "Repair and Maintenance" defaults to High because some of
+  // it is a power cut; a reporter who has told us one machine is affected has
+  // given better evidence than the category name, and maxing the two made
+  // every maintenance ticket High whatever they said.
+  const statedImpact = input.impact ? IMPACT_PRIORITY[input.impact] : undefined;
+  if (statedImpact) {
+    score = order.indexOf(statedImpact);
+    reasons.push(`stated business impact is ${statedImpact.toLowerCase()}`);
   }
 
   const urgentHit = URGENT_WORDS.find((w) => raw.includes(w));
@@ -207,7 +215,11 @@ export function detectPriority(input: {
     reasons.push(`urgency signal "${urgentHit}"`);
   } else {
     const highHit = HIGH_WORDS.find((w) => raw.includes(w));
-    if (highHit) {
+    // "not working", "broken", "down" describe the existence of a fault, not
+    // its severity — every fault ticket contains one. They escalate only when
+    // the reporter has not told us how wide the impact actually is.
+    const generic = highHit ? GENERIC_FAULT_WORDS.has(highHit) : false;
+    if (highHit && !(generic && (statedImpact === "Medium" || statedImpact === "Low"))) {
       score = Math.max(score, 2);
       reasons.push(`severity signal "${highHit}"`);
     }

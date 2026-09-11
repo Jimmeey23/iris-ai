@@ -787,3 +787,83 @@ it("does not interrogate a short report that already carries the detail", async 
   const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
   expect(out.state.step).toBe("review");
 });
+
+/* ------------------------------------------------------------------ */
+/* The washing-machine transcript, 11 Sept                             */
+/* ------------------------------------------------------------------ */
+
+it("binds a studio the reporter typed rather than clicked", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    // The model did not put the studio in its slots — the typed answer must
+    // still land, because the gate is in agentAsked and will never re-ask.
+    turn: turn({ readyForDraft: false, nextQuestion: { id: "custom:symptom", ask: "What is it doing?" } }),
+  });
+  const s = emptyState();
+  s.data.rawText = "the washing machine stopped working";
+  s.data.category = "Repair and Maintenance";
+  s.pendingQuestionId = "studio";
+  s.agentAsked = ["studio"];
+  const out = await runAgentTurn(s, [], { text: "Kwality House, Kemps Corner" }, ctx);
+  expect(out.state.data.studioName).toBe("Kwality House, Kemps Corner");
+  expect(out.state.data.studioId).toBe(1);
+});
+
+it("does not read 'still happening' as someone being in danger", () => {
+  const ai = localEnrich({
+    text: "the washing machine stopped working Kwality House, Kemps Corner Still happening",
+    opening: "the washing machine stopped working",
+    category: "Repair and Maintenance",
+    subcategory: "General Maintenance Delays",
+    studioName: "Kwality House, Kemps Corner",
+    resolvedNow: false,
+  });
+  expect(ai.severity).not.toBe("Severe");
+  expect(ai.priorityReason ?? "").not.toMatch(/immediate risk/i);
+});
+
+it("lets a stated single-member impact outrank the category's High baseline", () => {
+  const ai = localEnrich({
+    text: "the washing machine stopped working",
+    opening: "the washing machine stopped working",
+    category: "Repair and Maintenance",
+    subcategory: "General Maintenance Delays",
+    impact: "single",
+    studioName: "Kwality House, Kemps Corner",
+    resolvedNow: false,
+  });
+  expect(ai.priority).toBe("Medium");
+});
+
+it("titles the ticket with the problem, not the filing label", () => {
+  const ai = localEnrich({
+    text: "the washing machine stopped working Kwality House, Kemps Corner Still happening",
+    opening: "the washing machine stopped working",
+    category: "Repair and Maintenance",
+    subcategory: "General Maintenance Delays",
+    studioName: "Kwality House, Kemps Corner",
+    resolvedNow: false,
+  });
+  expect(ai.title).toMatch(/washing machine/i);
+  expect(ai.title).not.toBe("General Maintenance Delays (still unresolved)");
+});
+
+it("never follows a finished draft with a reply still asking for facts", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      reply: "The washing machine issue is ongoing, and I need to know where it's happening.",
+      slots: {
+        studio: { value: "Kemps Corner" }, impact: { value: "single" }, resolvedNow: { value: false },
+        occurredAt: { value: "This morning" }, actionTaken: { value: "Reported to facilities" },
+      },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: "the washing machine stopped working" }, ctx);
+  expect(out.state.step).toBe("review");
+  expect(out.messages.some((m) => /need to know/i.test(m.content))).toBe(false);
+});

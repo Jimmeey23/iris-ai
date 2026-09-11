@@ -34,6 +34,11 @@ export type EngineContext = {
 
 export type IntakeData = {
   rawText?: string;
+  /**
+   * The first substantive thing the reporter said. `rawText` accumulates every
+   * later answer, which makes it useless as the source of a title.
+   */
+  reportOpening?: string;
   category?: string;
   subcategory?: string;
   studioId?: number | null;
@@ -577,6 +582,7 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
     s.insight ??
     localEnrich({
       text: raw,
+      opening: d.reportOpening,
       category,
       subcategory,
       impact: d.impact,

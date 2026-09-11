@@ -186,7 +186,11 @@ const MEMBERSHIP_PATTERNS: { re: RegExp; value: string }[] = [
   { re: /\b(trial|intro offer|introductory)\b/i, value: "Trial / intro offer" },
 ];
 
-const RISK_YES = /\b(unsafe|still happening|right now|danger|injur|bleeding|fainted|collapsed|fire|emergency|harass|assault|trapped|electric shock)\b/i;
+// "Still happening" answers "is it resolved?", not "is anyone in danger?".
+// Reading it as live risk forced Severe severity, urgency 82 and a 1h clock
+// onto a broken washing machine — the reporter had simply said the fault
+// was not fixed yet. Risk words only, and only ones that mean harm.
+const RISK_YES = /\b(unsafe|danger|injur|bleeding|fainted|collapsed|fire|emergency|harass|assault|trapped|electric shock)\b/i;
 const NO_RISK = /\b(no one was hurt|nobody hurt|no injury|not urgent|no one is at risk)\b/i;
 const RESOLVED_YES = /\b(power|electricity|issue|problem|fault|it)\s+(?:is|was|has been)?\s*(?:back|restored|fixed|resolved)|\beverything (?:is|was) (?:back|restored|fixed|resolved)|\bno longer happening\b/i;
 const RESOLVED_NO = /\b(still (?:happening|ongoing|down|out|broken|unresolved)|not (?:fixed|resolved|restored)|hasn'?t been (?:fixed|resolved|restored))\b/i;

@@ -340,7 +340,7 @@ const TEXT_ANSWER_SLOTS = new Set([
  * omit the answer from structured state. */
 const DECLINED_ANSWER = /^(skip|pass|don'?t know|dunno|no idea|not sure|unknown|n\/a|not applicable)[.!]?$/i;
 
-function bindPendingTextAnswer(text: string, s: IntakeState): void {
+function bindPendingTextAnswer(text: string, s: IntakeState, ctx: EngineContext): void {
   const pending = s.pendingQuestionId;
   const answer = text.trim();
   if (!pending || !answer) return;
@@ -368,12 +368,23 @@ function bindPendingTextAnswer(text: string, s: IntakeState): void {
   } else if (pending === "atRisk") {
     if (!/^(yes|no|true|false)\b/i.test(answer)) return;
     s.data.atRisk = /^(yes|true)\b/i.test(answer);
+  } else if (pending === "studio") {
+    // The studio question renders buttons, so a click always worked — but a
+    // reporter who types "Kwality House, Kemps Corner" was answering the same
+    // question, and that reply used to bind to nothing. The gate never re-asks
+    // (it is in agentAsked), so the studio silently stayed unknown all the way
+    // to a ticket filed as "Not studio specific".
+    const match = resolveStudio(answer, ctx.studios);
+    if (!match) return;
+    s.data.studioId = match.id;
+    s.data.studioName = match.name;
   } else if (TEXT_ANSWER_SLOTS.has(pending)) {
     applyAnswerToSlot(pending, answer, s);
   } else {
     return;
   }
   markSlotSource(s, pending === "trainer" ? "trainerName" : pending, "user");
+  if (pending === "studio") markSlotSource(s, "studioName", "user");
 }
 
 /* ------------------------------------------------------------------ */
@@ -871,7 +882,7 @@ export async function runAgentTurn(
   // makes later volunteered details available before the model plans a question
   // or a Momence lookup.
   if (utterance) {
-    bindPendingTextAnswer(utterance, s);
+    bindPendingTextAnswer(utterance, s, ctx);
     const before = { ...s.data };
     inferred.push(...inferFromText(utterance, s, ctx));
     // Regex extraction is a GUESS, not the reporter's word. Marking it "user"
@@ -1026,6 +1037,7 @@ export async function runAgentTurn(
       }
       const fallbackInsight = await insightFromAgent({
         text: narrative,
+        opening: s.data.reportOpening,
         category: s.data.category ?? "Miscellaneous",
         subcategory: s.data.subcategory ?? "",
         impact: s.data.impact,
@@ -1085,6 +1097,7 @@ export async function runAgentTurn(
     const existing = s.data.rawText?.trim();
     if (!existing || !existing.endsWith(utterance)) {
       s.data.rawText = [existing, utterance].filter(Boolean).join(" ");
+      if (!s.data.reportOpening) s.data.reportOpening = utterance.trim();
     }
   }
 
@@ -1587,6 +1600,7 @@ export async function runAgentTurn(
   const insight = await insightFromAgent({
     agent: turn.insight,
     text: narrative,
+    opening: s.data.reportOpening,
     category: s.data.category ?? "Miscellaneous",
     subcategory: s.data.subcategory ?? "",
     impact: s.data.impact,
@@ -1618,7 +1632,14 @@ export async function runAgentTurn(
   }
 
   const messages: ChatMessage[] = [];
-  if (turn.reply) {
+  // A reply that still asks for something cannot lead a finished draft. The
+  // controller has decided this turn ends in the draft, so "I need to know
+  // where it's happening" followed immediately by the completed ticket reads
+  // as an assistant arguing with itself.
+  const replyAsks = /\?|\bi (?:still )?need to know\b|\bcould you (?:tell|share|confirm)\b|\blet me know\b/i.test(
+    turn.reply ?? "",
+  );
+  if (turn.reply && !replyAsks) {
     messages.push(
       assistantMessage(turn.reply, {
         ...(first ? { analysis: analysisChips(s, turn.classification.confidence) } : {}),
