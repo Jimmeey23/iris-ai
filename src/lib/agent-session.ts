@@ -989,7 +989,12 @@ export async function runAgentTurn(
 
   hooks.onStatus?.("Reading your report");
   hooks.onReplyRestart?.();
-  let result = await runAgent(convo, agentCtx, { onReplyDelta: hooks.onReplyDelta });
+  const announceLookup = (tool: string) =>
+    hooks.onStatus?.(`Checking ${tool.replace(/_/g, " ")} in Momence`);
+  let result = await runAgent(convo, agentCtx, {
+    onReplyDelta: hooks.onReplyDelta,
+    onLookup: announceLookup,
+  });
 
   // Never disguise a rules questionnaire as AI. Preserve the reporter's words
   // and make a transient/configuration failure explicit so the turn can retry.
@@ -1087,26 +1092,11 @@ export async function runAgentTurn(
 
   applyTurnFacts(result.turn, s, ctx);
 
-  // Momence lookup loop. The agent asks for facts, we fetch them, it continues.
-  // Capped so a confused model cannot spin, and every result is remembered on
-  // the session so the same lookup is never paid for twice.
-  const TOOL_ROUNDS = 2;
-  for (let round = 0; round < TOOL_ROUNDS; round++) {
-    const calls = result.turn?.toolCalls ?? [];
-    if (!calls.length) break;
-    hooks.onStatus?.(`Looking up ${calls.map((c) => c.tool.replace(/_/g, " ")).join(", ")} in Momence`);
-    const fresh = await runTools(calls);
-    toolResults.push(...fresh);
-    hooks.onReplyRestart?.();
-    const next = await runAgent(
-      convo,
-      { ...agentCtx, known: knownForAgent(s).known, toolResults },
-      { onReplyDelta: hooks.onReplyDelta },
-    );
-    if (!next.ok || !next.turn) break;
-    result = next;
-    applyTurnFacts(next.turn, s, ctx);
-  }
+  // There is no outer lookup loop any more: the agent calls Momence itself,
+  // mid-thought, and sees each result before deciding what to do next. What
+  // remains below are the two deterministic safety nets — resolve a named
+  // member once, and match a named class to a real session in code — because
+  // attaching the right ids matters more than whether the model remembered to.
 
   // The model must never burn a question on facts Momence holds. When a member
   // is named but has no id yet, resolve them once — the roster record carries

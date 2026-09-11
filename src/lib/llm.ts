@@ -385,3 +385,177 @@ export async function chatText(call: LlmCall): Promise<LlmTextResult> {
   });
   return { ok: false, error: lastError, model, latencyMs: Date.now() - started };
 }
+
+/* ------------------------------------------------------------------ */
+/* Native tool calling                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A message in an OpenAI tool-calling conversation. Tool results come back as
+ * their own role, addressed to the call that produced them, so the model sees a
+ * genuine transcript of its own investigation rather than facts pasted into a
+ * prompt by us.
+ */
+export type LlmMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content?: string | null; tool_calls?: RawToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+export type RawToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export type LlmToolDef = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+};
+
+export type ToolTurnResult = {
+  ok: boolean;
+  /** Prose the model wrote outside any tool call. */
+  content?: string;
+  toolCalls: RawToolCall[];
+  model?: string;
+  error?: string;
+  latencyMs: number;
+};
+
+/**
+ * One step of a tool-calling loop: send the conversation so far, get back
+ * either prose, one or more tool calls, or both.
+ *
+ * Streams so a terminal tool's `reply` argument can reach the reporter while
+ * the rest of the arguments are still being written — `streamField` names the
+ * argument to surface and `onFieldDelta` receives it.
+ */
+export async function chatWithTools(call: {
+  messages: LlmMessage[];
+  tools: LlmToolDef[];
+  /** "required" forces a tool call — used to make the model land the turn. */
+  toolChoice?: "auto" | "required";
+  tier?: ModelTier;
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+  feature?: string;
+  sessionId?: string;
+  streamField?: string;
+  onFieldDelta?: (text: string) => void;
+}): Promise<ToolTurnResult> {
+  const started = Date.now();
+  const key = await getOpenAiKey();
+  if (!key.startsWith("sk-")) return { ok: false, toolCalls: [], error: "no-api-key", latencyMs: 0 };
+  const model = await modelFor(call.tier ?? "reason");
+
+  const body = {
+    model,
+    temperature: call.temperature ?? 0.2,
+    max_tokens: call.maxTokens ?? 2200,
+    tools: call.tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    })),
+    tool_choice: call.toolChoice ?? "auto",
+    parallel_tool_calls: true,
+    stream: true,
+    messages: call.messages,
+  };
+
+  const finish = (result: ToolTurnResult): ToolTurnResult => {
+    void recordAiCall({
+      feature: call.feature ?? "agent",
+      model,
+      ok: result.ok,
+      error: result.error,
+      latencyMs: result.latencyMs,
+      sessionId: call.sessionId,
+    });
+    return result;
+  };
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(call.timeoutMs ?? 60000),
+    });
+    if (!res.ok || !res.body) {
+      return finish({ ok: false, toolCalls: [], error: `http-${res.status}`, model, latencyMs: Date.now() - started });
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const streamer = call.streamField ? createFieldStreamer(call.streamField) : null;
+    // Tool calls stream in fragments identified by index, not by id.
+    const partial = new Map<number, { id: string; name: string; args: string }>();
+    let sseBuffer = "";
+    let content = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const chunk = JSON.parse(payload) as {
+            choices?: {
+              delta?: {
+                content?: string;
+                tool_calls?: {
+                  index: number;
+                  id?: string;
+                  function?: { name?: string; arguments?: string };
+                }[];
+              };
+            }[];
+          };
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta?.content) content += delta.content;
+          for (const tc of delta?.tool_calls ?? []) {
+            const slot = partial.get(tc.index) ?? { id: "", name: "", args: "" };
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (tc.function?.arguments) slot.args += tc.function.arguments;
+            partial.set(tc.index, slot);
+            // Surface the reply as it is written, from the first call only.
+            if (streamer && tc.index === 0 && call.onFieldDelta) {
+              const fresh = streamer(slot.args);
+              if (fresh) call.onFieldDelta(fresh);
+            }
+          }
+        } catch {
+          // A partial SSE frame — the next chunk completes it.
+        }
+      }
+    }
+
+    const toolCalls: RawToolCall[] = [...partial.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([index, slot]) => ({
+        id: slot.id || `call_${index}`,
+        type: "function" as const,
+        function: { name: slot.name, arguments: slot.args || "{}" },
+      }))
+      .filter((t) => t.function.name);
+
+    return finish({ ok: true, content, toolCalls, model, latencyMs: Date.now() - started });
+  } catch (err) {
+    return finish({
+      ok: false,
+      toolCalls: [],
+      error: err instanceof Error ? err.name : "exception",
+      model,
+      latencyMs: Date.now() - started,
+    });
+  }
+}

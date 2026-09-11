@@ -8,6 +8,7 @@ import {
   searchMembers,
 } from "./momence";
 import type { MomenceContext } from "./types";
+import type { LlmToolDef } from "./llm";
 
 /**
  * Read-only Momence lookups the intake agent may call for itself.
@@ -18,23 +19,6 @@ import type { MomenceContext } from "./types";
 
 export type ToolCall = { tool: string; args?: Record<string, unknown> };
 export type ToolResult = { tool: string; args?: Record<string, unknown>; result: string };
-
-/** Description block injected into the prompt so the model knows what exists. */
-export const TOOL_CATALOGUE = `AVAILABLE LOOKUPS (read-only, Momence)
-Momence is the studio's live booking system. It is the difference between a ticket that says "10 AM class" and one that says which session, which teacher, and how many members were booked into it. Use it.
-
-USE A LOOKUP WHENEVER:
-- the reporter names a class by time, format or teacher → find_sessions, then record the real session name, start time and teacher. Loose text like "10 AM" is not good enough for the owner.
-- members were affected and you need to know how many were actually booked → session_attendees
-- a member is named → search_member for their id and contact, then member_context if their package, credits or visit history bears on the issue
-Resolving a report against real sessions is normally worth one round of lookups before you ask the reporter anything.
-Never look up something the reporter already told you, and never repeat a lookup you have already made.
-- search_member {"query": "name, email or phone"} → matching members with id, contact and visit counts
-- member_context {"memberId": 123} → that member's memberships, credits left and recent bookings
-- find_sessions {"query": "class name or teacher", "date": "YYYY-MM-DD", "locationId": 9030} → real sessions with exact times and teachers. Omit "query" to see a whole day's timetable for a location, which is the right call when several classes are involved.
-- session_attendees {"sessionId": 123} → who was booked into that session
-
-To use one, return "toolCalls": [{"tool": "...", "args": {...}}] with "nextQuestion": null and "readyForDraft": false. You will be called again with the results and can then continue. At most 3 lookups per report — never repeat a lookup you already made.`;
 
 const MAX_ROWS = 8;
 
@@ -180,3 +164,77 @@ export async function momenceAvailable(): Promise<boolean> {
  * `momenceSessionId` / `momenceMemberId` explicitly when it is sure which row
  * is the right one.
  */
+
+/* ------------------------------------------------------------------ */
+/* Native function-calling schemas                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The lookups as real OpenAI functions, so the agent can investigate mid-thought
+ * — check a timetable *because* it is unsure — instead of having to declare
+ * every lookup it might want before it has seen any results.
+ */
+export const MOMENCE_TOOL_SCHEMAS: LlmToolDef[] = [
+  {
+    name: "find_sessions",
+    description:
+      "Search the real Momence timetable. Use whenever a class is named by time, format or teacher. Omit `query` to pull a whole day's timetable for a location — the right call when several classes are involved.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Class name or teacher. Omit for a full day." },
+        date: { type: "string", description: "YYYY-MM-DD, the day the report is about." },
+        locationId: { type: "number", description: "Momence location id for the studio." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "session_attendees",
+    description:
+      "Who was actually booked into a session, and whether they checked in. Use to establish how many members a problem really touched instead of guessing.",
+    parameters: {
+      type: "object",
+      properties: { sessionId: { type: "number" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "search_member",
+    description:
+      "Find a member by name, email or phone. Returns id, contact and visit counts — the exact spelling and contact the ticket should carry.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "member_context",
+    description:
+      "A member's memberships, credits left and recent bookings. Use when their package or history bears on the issue — a refund, a credit, a repeat complaint.",
+    parameters: {
+      type: "object",
+      properties: { memberId: { type: "number" } },
+      required: ["memberId"],
+      additionalProperties: false,
+    },
+  },
+];
+
+export const MOMENCE_TOOL_NAMES = new Set(MOMENCE_TOOL_SCHEMAS.map((t) => t.name));
+
+/** Run one named lookup. Never throws — failures come back as readable text. */
+export async function runToolByName(
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  try {
+    return await runOne({ tool, args });
+  } catch (err) {
+    return `lookup failed: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
