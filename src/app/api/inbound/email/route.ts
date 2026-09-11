@@ -1,14 +1,27 @@
 import { NextResponse } from "next/server";
 import { ingestEmail, normalizeFormEmail, normalizeWebhookEmail } from "@/lib/inbound-email";
+import {
+  fetchInboundMessage,
+  mailtrapInboundConfig,
+  messageToWebhookPayload,
+  parseInboundEvents,
+  verifyMailtrapSignature,
+} from "@/lib/mailtrap-inbound";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Inbound email webhook — the front door that turns a mailbox into tickets.
  *
- * Provider-agnostic: accepts Postmark inbound JSON, SendGrid inbound-parse
- * form posts, or any JSON with from/to/subject/text fields. Protect with
- * INBOUND_EMAIL_SECRET (bearer token or ?key=) — required in production.
+ * Two ways in:
+ *
+ * 1. Mailtrap Inbound, recognised by the `Mailtrap-Signature` header. Mailtrap
+ *    posts an EVENT, not the email, so each event's message is fetched from the
+ *    Messages API before it can be triaged. Authenticated by HMAC over the raw
+ *    body — a shared secret in the URL is not involved.
+ * 2. Any other provider (Postmark inbound JSON, SendGrid inbound-parse form
+ *    posts, or plain JSON with from/to/subject/text), authenticated with
+ *    INBOUND_EMAIL_SECRET as a bearer token or ?key=.
  */
 function authorized(request: Request, keyFromUrl: string | null): boolean {
   const secret = process.env.INBOUND_EMAIL_SECRET;
@@ -16,8 +29,75 @@ function authorized(request: Request, keyFromUrl: string | null): boolean {
   return keyFromUrl === secret || request.headers.get("authorization") === `Bearer ${secret}`;
 }
 
+type Ingested = { status: string; ticketId?: number };
+
+/**
+ * Mailtrap's events carry only ids, so each one costs a fetch. Handled inline
+ * because Mailtrap batches a handful at a time, and a webhook that returns
+ * before doing the work has no way to report that the work failed.
+ */
+async function handleMailtrap(rawBody: string, signature: string | null) {
+  const cfg = await mailtrapInboundConfig();
+  if (!cfg.signingSecret) {
+    // Refusing is the only safe answer: without the secret this endpoint would
+    // accept anything claiming to be Mailtrap.
+    console.error("[inbound] Mailtrap signature present but no signing secret configured");
+    return NextResponse.json({ error: "Mailtrap signing secret not configured" }, { status: 503 });
+  }
+  if (!verifyMailtrapSignature(rawBody, signature, cfg.signingSecret)) {
+    return NextResponse.json({ error: "Bad signature" }, { status: 401 });
+  }
+
+  const events = parseInboundEvents(rawBody);
+  if (!events.length) {
+    // A signed event we do not act on is still a delivered webhook — 200 keeps
+    // Mailtrap from retrying it forever.
+    return NextResponse.json({ ok: true, handled: 0 }, { status: 200 });
+  }
+
+  const results: { messageId: string; status: string; ticketId?: number }[] = [];
+  for (const event of events) {
+    const inboxId = event.inboxId ?? cfg.inboxId;
+    if (!inboxId) {
+      results.push({ messageId: event.messageId, status: "no-inbox-id" });
+      continue;
+    }
+    const message = await fetchInboundMessage(inboxId, event.messageId);
+    if (!message) {
+      results.push({ messageId: event.messageId, status: "fetch-failed" });
+      continue;
+    }
+    const email = normalizeWebhookEmail(messageToWebhookPayload(message));
+    if (!email) {
+      results.push({ messageId: event.messageId, status: "unreadable" });
+      continue;
+    }
+    if (event.receivedAt) email.receivedAt = event.receivedAt;
+    try {
+      const result = (await ingestEmail(email, { source: "mailtrap" })) as Ingested;
+      results.push({ messageId: event.messageId, status: result.status, ticketId: result.ticketId });
+    } catch (err) {
+      console.error("[inbound] triage failed:", err instanceof Error ? err.message : err);
+      results.push({ messageId: event.messageId, status: "triage-failed" });
+    }
+  }
+
+  // Any failure returns 5xx so Mailtrap retries the batch. Ingestion is
+  // idempotent on message id, so a replay re-delivers nothing.
+  const failed = results.some((r) => r.status === "fetch-failed" || r.status === "triage-failed");
+  return NextResponse.json({ ok: !failed, results }, { status: failed ? 500 : 200 });
+}
+
 export async function POST(request: Request) {
   const url = new URL(request.url);
+  const signature = request.headers.get("mailtrap-signature");
+
+  // The signature covers the bytes exactly as sent, so the body is read as text
+  // once and never re-serialised.
+  const rawBody = await request.text().catch(() => "");
+
+  if (signature !== null) return handleMailtrap(rawBody, signature);
+
   if (!authorized(request, url.searchParams.get("key"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -27,12 +107,10 @@ export async function POST(request: Request) {
   try {
     if (contentType.includes("application/x-www-form-urlencoded")) {
       const form: Record<string, string> = {};
-      for (const [k, v] of (await request.formData()).entries()) {
-        if (typeof v === "string") form[k] = v;
-      }
+      for (const [k, v] of new URLSearchParams(rawBody).entries()) form[k] = v;
       email = normalizeFormEmail(form);
     } else {
-      email = normalizeWebhookEmail(await request.json());
+      email = normalizeWebhookEmail(JSON.parse(rawBody));
     }
   } catch {
     return NextResponse.json({ error: "Unreadable payload" }, { status: 400 });
@@ -43,7 +121,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await ingestEmail(email);
+    const result = (await ingestEmail(email)) as Ingested;
     return NextResponse.json(result, { status: result.status === "duplicate" ? 200 : 201 });
   } catch (err) {
     // The email itself is stored — triage can be retried from the Inbox.

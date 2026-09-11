@@ -17,6 +17,7 @@ const SECRET_KEYS = [
   "fillout_api_key",
   "supabase_service_key",
   "mailtrap_token",
+  "mailtrap_signing_secret",
   "n8n_secret",
   "respondio_token",
 ];

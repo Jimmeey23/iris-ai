@@ -432,6 +432,20 @@ export default function SettingsPanel({
               <Field label="From email" value={form.mailtrap_from_email ?? ""} onChange={(v) => set("mailtrap_from_email", v)} placeholder="alerts@physique57india.com" />
               <Field label="From name" value={form.mailtrap_from_name ?? ""} onChange={(v) => set("mailtrap_from_name", v)} placeholder="Physique 57 IRIS Ai" />
             </div>
+            <div className="mt-4 border-t pt-3 hairline">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide txt-3">
+                Inbound email → tickets
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Webhook signing secret" value={form.mailtrap_signing_secret ?? ""} onChange={(v) => set("mailtrap_signing_secret", v)} type="password" mono
+                  hint="From the Mailtrap Inbound webhook screen. Without it, inbound webhooks are rejected." />
+                <Field label="Inbound inbox ID" value={form.mailtrap_inbound_inbox_id ?? ""} onChange={(v) => set("mailtrap_inbound_inbox_id", v)} mono
+                  hint="Fallback only — each event names its own inbox." />
+              </div>
+              <p className="mt-2 text-[11px] txt-3">
+                Point the Mailtrap Inbound webhook at <code>/api/inbound/email</code> on this host.
+              </p>
+            </div>
             <div className="mt-3 space-y-0.5">
               <Toggle label="Enable email sending" checked={bool("mailtrap_enabled", true)} onChange={(v) => set("mailtrap_enabled", String(v))} />
               <Toggle label="Notify assignee on new tickets" checked={bool("notify_assign", true)} onChange={(v) => set("notify_assign", String(v))} />
