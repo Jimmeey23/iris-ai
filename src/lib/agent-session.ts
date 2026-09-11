@@ -1242,28 +1242,62 @@ export async function runAgentTurn(
     question = null;
   }
 
-  // A question about the studio is the studio question, whatever the model
-  // decided to call it — that keeps the picker and the dedupe below honest.
-  if (question && /studio|location of the studio|which studio/i.test(question.id + " " + question.ask)) {
-    if (missing.includes("studio")) question = { ...question, id: "studio", allowFreeText: false };
-  }
-
   // Whether Momence can be asked "which classes, and who was in them" — that
   // decides whether the blast radius is a question for the reporter at all.
   const classSignal = hasClassSignal(narrative);
 
-  // Owner-critical gates. Routing, live-vs-resolved and blast radius change
-  // what the owner physically does, so they outrank the question budget: one
-  // focused question each, never the same one twice, with concrete options.
+  /* ---------------------------------------------------------------- *
+   * The model's question wins.                                        *
+   *                                                                   *
+   * It has read the whole conversation; the deterministic gates below *
+   * have read a category string. Replacing its question with a canned *
+   * one is what made Iris feel like a form — the reporter describes a *
+   * renovation and gets "Is this resolved now?" because the category  *
+   * matched a list. So the model's question is only ever REFINED here *
+   * (a real picker, real options, the right slot id), and the gates   *
+   * run solely when it asked nothing at all.                          *
+   * ---------------------------------------------------------------- */
+  const IMPACT_CHOICES = [
+    "Safety risk / classes blocked",
+    "Several members affected",
+    "One member / minor disruption",
+    "Suggestion or idea",
+  ].map((label) => ({ label, value: `ans:impact|${label}` }));
+  const RESOLVED_CHOICES = [
+    { label: "Resolved / fixed now", value: "ans:resolved|Yes — resolved" },
+    { label: "Still happening", value: "ans:resolved|No — still happening" },
+  ];
+
+  if (question) {
+    const subject = `${question.id} ${question.ask}`;
+    const canPickSessions = toolsEnabled && classSignal;
+    // Give the model's own question the best answering affordance we have, so
+    // asking "which class was it?" opens the timetable instead of a text box.
+    if (/studio|which site|which location/i.test(subject) && missing.includes("studio")) {
+      question = { ...question, id: "studio", allowFreeText: false };
+    } else if (canPickSessions && /which class|what class|which session|which classes/i.test(subject)) {
+      question = { ...question, id: "sessions", picker: "sessions", allowFreeText: true };
+    } else if (
+      s.data.momenceSessionIds?.length &&
+      /who was|which members|how many members|who else/i.test(subject)
+    ) {
+      question = { ...question, id: "attendees", picker: "attendees", allowFreeText: true };
+    } else if (question.id === "impact" && !question.options?.length) {
+      question = { ...question, options: IMPACT_CHOICES };
+    } else if (question.id === "resolvedNow" && !question.options?.length) {
+      question = { ...question, options: RESOLVED_CHOICES };
+    }
+  }
+
+  // Owner-critical gates. These fill a void: the model decided it had nothing
+  // to ask, but a fact the owner cannot act without is still missing. Ordered
+  // by what changes the owner's next move, most consequential first.
   const GATE_ASK: Record<string, string> = {
     studio: "Which studio does this relate to?",
     impact: "How wide is the impact — safety risk, several members, one member, or a suggestion?",
     resolvedNow: "Is this resolved now, or still happening?",
   };
-  if (missing.includes("studio") && !(s.agentAsked ?? []).includes("studio")) {
-    // Studio drives routing — it overrides whatever the model asked this turn.
-    question = { id: "studio", ask: GATE_ASK.studio, allowFreeText: false };
-  } else if (!question) {
+  if (!question) {
     // "Is this resolved now, or still happening?" is a question about a fault.
     // Asked about a renovation that starts next week it is nonsense, and it is
     // the reporter's first impression of how well Iris read them. Scheduled
@@ -1278,23 +1312,22 @@ export async function runAgentTurn(
     // roster of the affected sessions gives a real count, so asking the
     // reporter to characterise the blast radius first is a worse question. It
     // is applied further down, only if the pickers could not settle it.
-    const relevantGates = operationalFault
-      ? ((toolsEnabled && classSignal ? ["resolvedNow"] : ["resolvedNow", "impact"]) as readonly string[])
-      : ((toolsEnabled && classSignal ? [] : ["impact"]) as readonly string[]);
+    const relevantGates = [
+      "studio",
+      ...(operationalFault ? ["resolvedNow"] : []),
+      ...(toolsEnabled && classSignal ? [] : ["impact"]),
+    ] as readonly string[];
     for (const gate of relevantGates) {
       if (!missing.includes(gate) || (s.agentAsked ?? []).includes(gate)) continue;
       question = {
         id: gate,
         ask: GATE_ASK[gate],
-        allowFreeText: true,
+        allowFreeText: gate !== "studio",
         ...(gate === "impact"
-          ? { options: ["Safety risk / classes blocked", "Several members affected", "One member / minor disruption", "Suggestion or idea"].map((label) => ({ label, value: `ans:impact|${label}` })) }
-          : {
-              options: [
-                { label: "Resolved / fixed now", value: "ans:resolved|Yes — resolved" },
-                { label: "Still happening", value: "ans:resolved|No — still happening" },
-              ],
-            }),
+          ? { options: IMPACT_CHOICES }
+          : gate === "resolvedNow"
+            ? { options: RESOLVED_CHOICES }
+            : {}),
       };
       break;
     }

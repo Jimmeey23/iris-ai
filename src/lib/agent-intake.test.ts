@@ -86,7 +86,10 @@ it.each(["describe", "agent_q"] as const)("renders the power-outage question onc
   expect(result.messages[0].inferred).toBeUndefined();
 });
 
-it("removes the model's original ask when a routing gate replaces it", async () => {
+it("keeps the model's question instead of replacing it with a routing gate", async () => {
+  // The model read the report and asked the sharp question. A canned "which
+  // studio?" on top of that is what made Iris feel like a form rather than a
+  // colleague, so the gate now waits its turn instead of speaking over it.
   vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: {
     ...invitation, reportEstablished: true,
     reply: "Got it, Jimmeey. Has the electricity returned?",
@@ -94,7 +97,23 @@ it("removes the model's original ask when a routing gate replaces it", async () 
   } });
   const result = await runAgentTurn(emptyState(), [], { text: "The electricity went out." }, ctx);
   expect(result.messages).toHaveLength(1);
-  expect(result.messages[0].content).toContain("Which studio does this relate to?");
+  expect(result.messages[0].content).toBe("Is the power back?");
+  // The ask appears exactly once, and the model's prose ack is not repeated.
   expect(result.messages[0].content).not.toContain("Has the electricity returned?");
-  expect(result.messages[0].content).not.toContain("Is the power back?");
+  expect(result.state.pendingQuestionId).toBe("resolvedNow");
+});
+
+it("still gates the studio before drafting when the model runs out of questions", async () => {
+  // Deferring the gate must not lose it: routing depends on the studio, so the
+  // moment the model has nothing left to ask, the gate fills the void.
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: {
+    ...invitation, reportEstablished: true,
+    reply: "Got it, Jimmeey.",
+    classification: { ...invitation.classification, confidence: 0.9 },
+    nextQuestion: null, readyForDraft: true,
+  } });
+  const result = await runAgentTurn(emptyState(), [], { text: "The electricity went out." }, ctx);
+  expect(result.messages[0].content).toContain("Which studio does this relate to?");
+  expect(result.state.pendingQuestionId).toBe("studio");
+  expect(result.state.step).toBe("agent_q");
 });

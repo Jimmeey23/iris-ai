@@ -490,6 +490,24 @@ it("offers a multi-select session picker rather than guessing the classes", asyn
   expect(out.messages[0].picker).toBe("sessions");
 });
 
+it("upgrades the model's own class question to the timetable picker", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(true);
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      readyForDraft: false,
+      // The model asked the right thing; it just had a text box to answer into.
+      nextQuestion: { id: "custom:which_class", ask: "Which class was worst hit?" },
+      slots: { studio: { value: "Kemps Corner" } },
+    }),
+  });
+  const out = await runAgentTurn(emptyState(), [], { text: outage }, ctx);
+  expect(out.messages[0].content).toBe("Which class was worst hit?");
+  expect(out.messages[0].picker).toBe("sessions");
+  expect(out.state.pendingQuestionId).toBe("sessions");
+});
+
 it("does not offer a session picker when Momence is unavailable", async () => {
   vi.mocked(momenceAvailable).mockResolvedValue(false);
   vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
