@@ -75,8 +75,12 @@ export type AgentTurn = {
    * One question at a time reads as an interrogation when four facts are
    * missing; a colleague asks "what exactly is it doing, and since when?" in a
    * breath. The primary question keeps the options/picker — these are prose.
+   *
+   * Each carries a canonical slot id, so the controller can tell afterwards
+   * whether it was actually answered. An extra that goes unanswered is carried
+   * onto the ticket as an open item rather than quietly dropped.
    */
-  followUps?: string[];
+  followUps?: { id: string; ask: string }[];
   /** False while the reporter has only greeted us or has not described a reportable matter. */
   reportEstablished?: boolean;
   readyForDraft: boolean;
@@ -220,14 +224,14 @@ Choose the category whose DOMAIN owns the problem, then the best subcategory ins
 - injury, hazard, security → Safety and Security
 
 WHEN TO ASK A QUESTION
-Ask when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. One PRIMARY question per turn, in nextQuestion.ask — that is the one with options or a picker. You may add up to two SHORT extras in alsoAsk, asked in the same breath, when they are the detail that obviously follows. reply carries only a brief acknowledgement, never a question or a paraphrase of the ask. The application combines reply, the ask and the extras into one message.
+Ask when the answer would change one of: who the ticket routes to, how urgent it is, or what the owner has to physically do. One PRIMARY question per turn, in nextQuestion.ask — that is the one with options or a picker. You may add up to two SHORT extras in alsoAsk, asked in the same breath, when they are the detail that obviously follows. Every extra names the canonical slot it fills, so one that goes unanswered is chased onto the ticket rather than lost — never put a question in alsoAsk that no slot covers; that one is your primary question. reply carries only a brief acknowledgement, never a question or a paraphrase of the ask. The application combines reply, the ask and the extras into one message.
 A one-line report is almost never a complete one. "The mic in Studio 2 doesn't work" tells the owner nothing they can act on: not what it does (dead / cutting out / distorted / no battery), not whether classes are running without it, not when it started, not whether it has happened before. When a report is this thin, ask — the thinner the report, the more the extras earn their place.
 A detailed report is not the same as a complete one either. Going straight to the draft while an owner-critical gap is still open is worse than asking one more question.
 Give the primary question real options whenever the plausible answers are a short closed set (symptom type, how long, yes/no, who was affected). A tap beats typing for someone standing on a studio floor. Keep allowFreeText true so they can say something you did not list.
 
 Rank the gaps and ask the biggest one first. A reporter who answers three questions and never gets asked the obvious one concludes you were not listening. On an unresolved fault the ordering is almost always: what is being done about the cause → who or how many were affected and what they were offered → the smaller identifying details. Never spend the turn on a name when the cause is still unknown.
 Use the answer you just received. If the reporter tells you a fault is still live, your very next move reflects that: acknowledge it as live, and make your next question or your draft about getting it fixed and about the members sitting in it. Asking for a status and then filing the ticket as though the answer never arrived is the worst thing you can do to them.
-Never abandon a question you have just asked. If it goes unanswered because the reporter said something else or did not know, and it still matters, carry it into the draft as an open item rather than pretending it was answered or silently forgetting it — put it in extraDetails under a label such as "Still to confirm". Carrying it forward is an extraDetails entry, NOT a nextQuestion: when readyForDraft is true, nextQuestion must still be null. Never emit both.
+Never abandon a question you have just asked — including the extras you attached to it. If it goes unanswered because the reporter said something else or did not know, and it still matters, carry it into the draft as an open item rather than pretending it was answered or silently forgetting it — put it in extraDetails under a label such as "Still to confirm". Carrying it forward is an extraDetails entry, NOT a nextQuestion: when readyForDraft is true, nextQuestion must still be null. Never emit both.
 "I don't know" and "not sure" are answers, and what they tell you is that the fact is unknown — not that your guess was right. If you had inferred a value and the reporter cannot confirm it, drop the inference and record the field as unconfirmed. Never re-ask the same question hoping for a better answer.
 
 ALWAYS ESTABLISH THESE BEFORE DRAFTING — ask, or look them up, whenever they are relevant and unknown:
@@ -411,9 +415,21 @@ const TERMINAL_TOOLS: LlmToolDef[] = [
         alsoAsk: {
           type: "array",
           maxItems: 2,
-          items: { type: "string" },
+          items: {
+            type: "object",
+            properties: {
+              id: {
+                type: "string",
+                enum: [...CANONICAL_SLOTS],
+                description: "The canonical slot this extra fills, so an unanswered one can be chased.",
+              },
+              ask: { type: "string", description: "Under 15 words." },
+            },
+            required: ["id", "ask"],
+            additionalProperties: false,
+          },
           description:
-            "Up to two SHORT extra questions asked in the same breath as `question`, each under 15 words. Use them for the detail that always follows: what exactly is failing, who or what it affected, when it started, whether it has happened before. Omit rather than pad.",
+            "Up to two SHORT extra questions asked in the same breath as `question`. Use them for the detail that always follows: when it started (occurredAt), whether it has happened before (frequency), who or how many were affected (impact), whether it is still happening (resolvedNow), what has been done (actionTaken). Each must name the slot it fills. Omit rather than pad.",
         },
         classification: CLASSIFICATION_OBJ,
         slots: SLOT_ARRAY,
@@ -487,7 +503,7 @@ const TERMINAL_NAMES = new Set(TERMINAL_TOOLS.map((t) => t.name));
 type TerminalArgs = {
   reply?: string;
   question?: AgentQuestion & { options?: { label: string; value: string }[] };
-  alsoAsk?: string[];
+  alsoAsk?: { id: string; ask: string }[];
   classification?: AgentTurn["classification"];
   slots?: { id: string; value: string; quote?: string }[];
   insight?: AgentInsight;
@@ -858,8 +874,9 @@ function normaliseTurn(raw: AgentTurn, transcript: ChatMessage[]): AgentTurn {
       readyForDraft || toolCalls.length || !nextQuestion
         ? []
         : (raw.followUps ?? [])
-            .map((q) => String(q).trim())
-            .filter((q) => q.length > 2 && q !== nextQuestion.ask.trim())
+            .filter((q) => q?.id && q?.ask)
+            .map((q) => ({ id: String(q.id).trim(), ask: String(q.ask).trim() }))
+            .filter((q) => q.ask.length > 2 && q.id !== nextQuestion.id && q.ask !== nextQuestion.ask.trim())
             .slice(0, 2),
     readyForDraft,
     toolCalls,

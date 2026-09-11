@@ -748,7 +748,10 @@ it("asks the model's extras in the same breath as its question", async () => {
     turn: turn({
       readyForDraft: false,
       nextQuestion: { id: "custom:symptom", ask: "What exactly is the mic doing?" },
-      followUps: ["When did it start?", "Has it happened before?"],
+      followUps: [
+        { id: "occurredAt", ask: "When did it start?" },
+        { id: "frequency", ask: "Has it happened before?" },
+      ],
       slots: { studio: { value: "Kemps Corner" } },
     }),
   });
@@ -866,4 +869,38 @@ it("never follows a finished draft with a reply still asking for facts", async (
   const out = await runAgentTurn(emptyState(), [], { text: "the washing machine stopped working" }, ctx);
   expect(out.state.step).toBe("review");
   expect(out.messages.some((m) => /need to know/i.test(m.content))).toBe(false);
+});
+
+it("carries an extra the reporter never answered onto the ticket", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  // Turn 1: Iris asks for the studio and slips in "when did it start?".
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      readyForDraft: false,
+      nextQuestion: { id: "studio", ask: "Which studio is this in?" },
+      followUps: [{ id: "occurredAt", ask: "When did you first notice it?" }],
+    }),
+  });
+  const asked = await runAgentTurn(emptyState(), [], { text: "the washing machine stopped working" }, ctx);
+  expect(asked.state.agentAsked).toContain("occurredAt");
+  expect(asked.messages[0].content).toContain("When did you first notice it?");
+
+  // Turn 2: the reporter answers only the studio, and Iris drafts. The
+  // abandoned extra must show up as an open item, not vanish.
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({
+      slots: {
+        impact: { value: "single" }, resolvedNow: { value: false },
+        actionTaken: { value: "Reported it to facilities" },
+        frequency: { value: "First time" }, notes: { value: "Drum will not spin" },
+      },
+    }),
+  });
+  const drafted = await runAgentTurn(asked.state, [], { text: "Kwality House, Kemps Corner" }, ctx);
+  expect(drafted.state.step).toBe("review");
+  expect(drafted.state.data.extraDetails?.["Still to confirm"]).toMatch(/first notice/i);
 });

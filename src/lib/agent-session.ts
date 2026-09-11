@@ -792,11 +792,11 @@ function questionMessage(
   ctx: EngineContext,
   budget: number,
   lead?: string,
-  followUps: string[] = [],
+  followUps: { id: string; ask: string }[] = [],
 ): ChatMessage {
   const options = q.id === "studio" ? studioOptions(ctx) : questionOptions(q);
   const ack = (lead ?? "").trim();
-  const ask = [q.ask, ...followUps.map((f) => f.trim()).filter(Boolean)].join(" ");
+  const ask = [q.ask, ...followUps.map((f) => f.ask.trim()).filter(Boolean)].join(" ");
   // A model that ignored the instruction and put the question in `reply` too
   // must not have it read back twice.
   const keepAck = ack && !ack.includes("?") && !ask.toLowerCase().includes(ack.toLowerCase());
@@ -1538,20 +1538,31 @@ export async function runAgentTurn(
   const first = (state.agentAsked?.length ?? 0) === 0 && state.step === "describe";
 
   if (question) {
+    // Extras belong to the model's own question. A gate that replaced it is a
+    // different ask, and bolting unrelated extras onto it reads as a non
+    // sequitur.
+    const extras =
+      question.id === modelQuestionId
+        ? followUps.filter(
+            (f) =>
+              f.id !== question!.id &&
+              knownQuestionSlots[f.id] === undefined &&
+              !(s.agentAsked ?? []).includes(f.id),
+          )
+        : [];
     s.step = "agent_q";
     s.pendingQuestionId = question.id;
-    s.agentAsked = [...(s.agentAsked ?? []), question.id];
-    s.agentAskLog = [...(s.agentAskLog ?? []), { id: question.id, ask: question.ask }];
-    const messages = [
-      questionMessage(
-        question,
-        s,
-        ctx,
-        budget,
-        turn.reply,
-        question.id === modelQuestionId ? followUps : [],
-      ),
+    // Each extra is logged under the slot it fills, exactly like the primary
+    // question. That is what makes it chaseable: at draft time the controller
+    // can see the slot is still empty and carry the ask onto the ticket
+    // instead of letting the reporter's unanswered question evaporate.
+    s.agentAsked = [...(s.agentAsked ?? []), question.id, ...extras.map((f) => f.id)];
+    s.agentAskLog = [
+      ...(s.agentAskLog ?? []),
+      { id: question.id, ask: question.ask },
+      ...extras.map((f) => ({ id: f.id, ask: f.ask })),
     ];
+    const messages = [questionMessage(question, s, ctx, budget, turn.reply, extras)];
     return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 
