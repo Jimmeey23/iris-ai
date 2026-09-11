@@ -156,7 +156,7 @@ it("withdraws the lookups and forces a landing on the final step", async () => {
   expect(last.toolChoice).toBe("required");
   expect(last.tools.map((t) => t.name)).not.toContain("find_sessions");
   // The loop is bounded, so a spinning model cannot burn the session.
-  expect(calls.length).toBeLessThanOrEqual(5);
+  expect(calls.length).toBeLessThanOrEqual(6);
 });
 
 it("does not offer lookup tools when Momence is disconnected", async () => {
@@ -199,4 +199,45 @@ it("survives a terminal call whose arguments are not valid JSON", async () => {
   const out = await runAgent(transcript, ctx);
   expect(out.ok).toBe(false);
   expect(out.error).toBe("unparsable-terminal-call");
+});
+
+it("does not pay twice for the same lookup", async () => {
+  vi.mocked(chatWithTools)
+    .mockResolvedValueOnce(reply([call("find_sessions", { query: "cycle" }, "a1")]))
+    // The model asks for the identical timetable again a step later.
+    .mockResolvedValueOnce(reply([call("find_sessions", { query: "cycle" }, "a2")]))
+    .mockResolvedValueOnce(
+      reply([call("ask_reporter", {
+        reply: "ok",
+        question: { id: "impact", ask: "How many were in?" },
+        classification: CLASSIFICATION,
+        slots: [],
+      })]),
+    );
+  await runAgent(transcript, ctx);
+  expect(runToolByName).toHaveBeenCalledTimes(1);
+});
+
+it("reuses lookups already run before the turn started", async () => {
+  vi.mocked(chatWithTools).mockResolvedValueOnce(
+    reply([call("find_sessions", { date: "2026-09-11" })]),
+  ).mockResolvedValueOnce(
+    reply([call("ask_reporter", {
+      reply: "ok",
+      question: { id: "impact", ask: "How many?" },
+      classification: CLASSIFICATION,
+      slots: [],
+    })]),
+  );
+  // The controller pre-fetches the timetable before the agent runs; asking for
+  // it again must not hit Momence a second time.
+  await runAgent(transcript, {
+    ...ctx,
+    toolResults: [
+      { tool: "find_sessions", args: { date: "2026-09-11" }, result: "id=9 Prefetched · 10:00 am" },
+    ],
+  });
+  expect(runToolByName).not.toHaveBeenCalled();
+  const second = vi.mocked(chatWithTools).mock.calls[1][0];
+  expect(JSON.stringify(second.messages)).toContain("Prefetched");
 });

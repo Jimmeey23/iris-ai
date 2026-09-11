@@ -262,7 +262,11 @@ You have tools. Every turn ends with exactly ONE of these three calls, and you m
 - ask_reporter — one question that would genuinely change who this routes to, how urgent it is, or what the owner must do.
 - file_ticket — you have enough; produce the finished draft.
 
-Investigate first. If a lookup could answer what you were about to ask, call the lookup, read the result, and carry on. Chain them when it helps: pull the day's timetable, find the session, then pull its roster to see who was actually booked in. Never ask a human for something Momence just told you.
+Investigate first. If a lookup could answer what you were about to ask, call the lookup, read the result, and carry on. Never ask a human for something Momence just told you.
+
+Issue every lookup that does not depend on another one IN THE SAME STEP, as several tool calls at once. Three classes to resolve is one step with three calls, not three steps — each step is a round trip the reporter waits through. Chain only where you genuinely must: pull a timetable, then pull the roster of the session it revealed.
+
+Never infer whether a fault is still happening. "The power was out for an hour" does not say whether it is back. If resolvedNow is not something the reporter actually told you, leave it unset and ask — it is the one fact that decides whether the owner is fixing something live or writing it up afterwards, and guessing it wrong is worse than asking.
 
 WHAT TO PUT IN THE CALL
 - "slots" is a list of {id, value, quote}. The quote is the reporter's own words the value came from — if you cannot quote it, you are guessing, so leave it out.
@@ -427,14 +431,14 @@ const TERMINAL_TOOLS: LlmToolDef[] = [
             suggestedAction: { type: "string" },
             sentiment: { type: "string", enum: ["Positive", "Neutral", "Negative", "Escalated"] },
             emotion: { type: "string" },
-            urgencyScore: { type: "number" },
+            urgencyScore: { type: "number", description: "0-100, consistent with the priority you chose." },
             churnRisk: { type: "string", enum: ["Low", "Medium", "High"] },
             effort: { type: "string", enum: ["Low", "Medium", "High"] },
             priority: { type: "string", enum: ["Low", "Medium", "High", "Critical"] },
             priorityReason: { type: "string" },
             tags: { type: "array", items: { type: "string" }, maxItems: 6 },
           },
-          required: ["title", "summary", "rootCause", "suggestedAction", "priority"],
+          required: ["title", "summary", "rootCause", "suggestedAction", "priority", "urgencyScore", "sentiment", "effort"],
           additionalProperties: false,
         },
         secondaryIssues: {
@@ -533,10 +537,11 @@ export type RunAgentOptions = {
 };
 
 /**
- * How many times the agent may think before it must land the turn. Enough to
- * pull a timetable, read it, and pull a roster off the back of it.
+ * How many times the agent may think before it must land the turn. A real
+ * investigation is timetable → session → roster → land, and a nudge can eat
+ * one, so five left no headroom on the live outage report.
  */
-const MAX_AGENT_STEPS = 5;
+const MAX_AGENT_STEPS = 6;
 
 export async function runAgent(
   transcript: ChatMessage[],
@@ -617,6 +622,12 @@ Land this turn by calling exactly one of: invite_report, ask_reporter, file_tick
 
   const lookupTools = ctx.toolsEnabled ? MOMENCE_TOOL_SCHEMAS : [];
   const started = Date.now();
+  // Same lookup, same answer. A model that re-asks for a timetable it already
+  // has should not cost the reporter another round trip to Momence.
+  const lookupCache = new Map<string, string>();
+  for (const prior of ctx.toolResults ?? []) {
+    lookupCache.set(`${prior.tool}:${JSON.stringify(prior.args ?? {})}`, prior.result);
+  }
   let model: string | undefined;
   let lastError = "agent-unavailable";
 
@@ -674,16 +685,29 @@ Land this turn by calling exactly one of: invite_report, ask_reporter, file_tick
     }
 
     messages.push({ role: "assistant", content: res.content ?? null, tool_calls: lookups });
-    for (const call of lookups) {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
-      } catch {
-        // An unparsable argument list is the model's mistake to see and correct.
-      }
-      opts.onLookup?.(call.function.name, args);
-      const result = await runToolByName(call.function.name, args);
-      messages.push({ role: "tool", tool_call_id: call.id, content: result });
+    // The model issues a batch because those lookups do not depend on each
+    // other, so running them one after another just adds their latencies
+    // together — five sequential timetable calls is most of a twenty-second
+    // wait for someone standing on a studio floor.
+    const results = await Promise.all(
+      lookups.map(async (call) => {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+        } catch {
+          // An unparsable argument list is the model's mistake to see and correct.
+        }
+        const key = `${call.function.name}:${JSON.stringify(args)}`;
+        const cached = lookupCache.get(key);
+        if (cached !== undefined) return { id: call.id, content: cached };
+        opts.onLookup?.(call.function.name, args);
+        const content = await runToolByName(call.function.name, args);
+        lookupCache.set(key, content);
+        return { id: call.id, content };
+      }),
+    );
+    for (const r of results) {
+      messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
     }
   }
 
