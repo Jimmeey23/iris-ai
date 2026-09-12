@@ -1,10 +1,11 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { chatSessions } from "@/db/schema";
-import { getStudios, createTicketBundle } from "@/lib/tickets";
+import { getStudios, createTicketBundle, amendTicketFromChat, raiseLinkedTicket } from "@/lib/tickets";
 import { aiEnrich } from "@/lib/enrich";
 import { runAgentTurn, type AgentTurnResult, type TurnHooks } from "@/lib/agent-session";
 import {
+  assistantMessage,
   buildDraft,
   createdMessage,
   emptyState,
@@ -269,6 +270,8 @@ export async function runChatTurn(
           {
             id: ticket.id,
             ticketNumber: ticket.ticketNumber,
+            title: ticket.title,
+            studioName: ticket.studioName,
             assigneeName: ticket.assigneeName,
             assigneeTeam: ticket.assigneeTeam,
             assigneeEmail: ticket.assigneeEmail,
@@ -284,6 +287,46 @@ export async function runChatTurn(
         ),
       ];
     }
+    // A message on a live ticket can change that ticket, or raise a linked one.
+    // The permission check is server-side and narrow on purpose: a chat session
+    // may amend the ticket *it* raised — the id comes from the session row, not
+    // from the request body — and nothing else.
+    if (agentResult.intent) {
+      const ownsTicket = state.createdTicketId != null && agentResult.intent.ticketId === state.createdTicketId;
+      if (!ownsTicket) {
+        responseDegradation = "amend-not-permitted";
+      } else if (agentResult.intent.kind === "amend") {
+        const actor = ctx.reporter.name;
+        await amendTicketFromChat(agentResult.intent.ticketId, agentResult.intent.update, actor, {
+          kind: agentResult.intent.amendmentKind,
+          priority: agentResult.intent.priority,
+        }).catch(() => null);
+      } else {
+        const base = buildDraft(state, ctx, state.insight);
+        const child = await raiseLinkedTicket({
+          parentTicketId: agentResult.intent.ticketId,
+          draft: {
+            ...base,
+            title: agentResult.intent.title,
+            summary: agentResult.intent.summary,
+            category: agentResult.intent.category,
+            subcategory: agentResult.intent.subcategory,
+            priority: (agentResult.intent.priority as typeof base.priority) ?? base.priority,
+            description: [agentResult.intent.summary, "", `Raised in a follow-up conversation about ${base.title}.`].join("\n"),
+          },
+        }).catch(() => null);
+        if (child) {
+          messages = [
+            ...messages,
+            assistantMessage(
+              `Raised **${child.ticketNumber}** and linked it to the original, so it routes to its own owner${child.assigneeName ? ` (${child.assigneeName})` : ""}.`,
+              { kind: "created", created: { id: child.id, ticketNumber: child.ticketNumber, title: child.title, studioName: child.studioName, assigneeName: child.assigneeName, assigneeTeam: child.assigneeTeam, assigneeEmail: child.assigneeEmail, assignmentReason: child.assignmentReason, slaDueAt: child.slaDueAt ? child.slaDueAt.toISOString() : null, priority: child.priority } },
+            ),
+          ];
+        }
+      }
+    }
+
     transcript = [...transcript, ...messages];
   }
 

@@ -611,6 +611,30 @@ it("treats readyForDraft alongside a question as a question turn, not an error",
 });
 
 /* ------------------------------------------------------------------ */
+/* The draft card speaks in the model's voice                           */
+/* ------------------------------------------------------------------ */
+
+it("uses the model's hand-over line on the draft card", async () => {
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: turn({ handoverNote: "Two rooms kept power, so it looks like one circuit — worth checking the panel first." }),
+  });
+  const filed = await runAgentTurn(reportState(), [], { text: "Just raise it" }, ctx);
+  const card = filed.messages.find((m) => m.kind === "draft");
+  expect(card?.content).toMatch(/one circuit/);
+  // The buttons stay, whatever the prose says.
+  expect(card?.options?.map((o) => o.value)).toEqual(["approve", "edit", "restart"]);
+});
+
+it("falls back to the fixed line when no hand-over was written", async () => {
+  vi.mocked(runAgent).mockResolvedValue({ ok: true, latencyMs: 0, turn: turn() });
+  const filed = await runAgentTurn(reportState(), [], { text: "Just raise it" }, ctx);
+  const card = filed.messages.find((m) => m.kind === "draft");
+  expect(card?.content).toMatch(/Here's your draft/);
+});
+
+/* ------------------------------------------------------------------ */
 /* A failing reasoning pass must not trap the report                    */
 /* ------------------------------------------------------------------ */
 
@@ -767,12 +791,24 @@ it("will not let a one-line fault report go straight to the draft", async () => 
   vi.mocked(runAgent).mockResolvedValue({
     ok: true,
     latencyMs: 0,
-    turn: turn({ slots: { studio: { value: "Kemps Corner" }, impact: { value: "single" }, resolvedNow: { value: false } } }),
+    turn: turn({
+      classification: {
+        category: "Tech Issues",
+        subcategory: "Mic Not Working",
+        confidence: 0.9,
+        alternates: [],
+      },
+      slots: { studio: { value: "Kemps Corner" }, impact: { value: "single" }, resolvedNow: { value: false } },
+    }),
   });
   const out = await runAgentTurn(emptyState(), [], { text: thin }, ctx);
   expect(out.state.step).toBe("agent_q");
-  expect(out.state.pendingQuestionId).toBe("custom:symptom");
-  expect(out.messages[0].options?.length).toBeGreaterThan(2);
+  // "Mic" and "studio 2" are read out of the sentence before the model even
+  // runs, so the question that comes back is the bank's next open ask for this
+  // issue — not the device-symptom ladder that was once offered to every thin
+  // report in the app, a stolen handbag included.
+  expect(out.state.pendingQuestionId).toBe("actionTaken");
+  expect(out.messages[0].content).toContain("Tried a battery swap or the backup?");
 });
 
 it("does not interrogate a short report that already carries the detail", async () => {

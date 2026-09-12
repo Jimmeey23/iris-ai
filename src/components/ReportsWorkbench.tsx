@@ -72,7 +72,6 @@ export default function ReportsWorkbench({ studios }: { studios: string[] }) {
   const [department, setDepartment] = useState("all");
   const [category, setCategory] = useState("all");
   const [data, setData] = useState<Payload | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortAsc, setSortAsc] = useState(false);
@@ -91,9 +90,19 @@ export default function ReportsWorkbench({ studios }: { studios: string[] }) {
     [reportId, period, studio, department, category],
   );
 
-  const load = useCallback(() => {
-    setLoading(true);
+  // Derived, exactly as in SignalsBoard: the fetch effect only writes state when
+  // a response arrives, so switching report or params cannot cascade a render.
+  const [loadedParams, setLoadedParams] = useState<string | null>(null);
+  const loading = loadedParams !== params;
+  // A new request clears the previous failure as part of rendering the new one,
+  // rather than as a second render triggered from the fetch effect.
+  const [errorParams, setErrorParams] = useState(params);
+  if (errorParams !== params) {
+    setErrorParams(params);
     setError(null);
+  }
+
+  const load = useCallback(() => {
     apiFetch<Payload>(`/api/reports?${params}`)
       .then((d) => {
         setData(d);
@@ -103,7 +112,7 @@ export default function ReportsWorkbench({ studios }: { studios: string[] }) {
         setData(null);
         setError(e instanceof ApiError ? e.message : (e as Error).message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedParams(params));
   }, [params]);
 
   useEffect(() => {

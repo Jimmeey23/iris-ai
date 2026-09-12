@@ -72,8 +72,11 @@ export function Providers({ children }: { children: ReactNode }) {
     const storedTheme = window.localStorage.getItem("p57.theme") as Theme | null;
     const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
     const next = storedTheme ?? (prefersDark ? "dark" : "light");
-    setTheme(next);
+    // The stored theme is browser-only, so the first paint uses the default.
+    // The class lands immediately; React state settles on the next frame rather
+    // than cascading a second render out of the effect body.
     document.documentElement.classList.toggle("dark", next === "dark");
+    const settle = requestAnimationFrame(() => setTheme(next));
 
     apiFetch<{ user?: { id: string; name: string; email: string; role: Role; department: string; jobTitle: string; studio: string } }>("/api/auth/me")
       .then((data) => {
@@ -103,6 +106,7 @@ export function Providers({ children }: { children: ReactNode }) {
         console.error("Unable to load the signed-in profile", error);
       })
       .finally(() => setLoading(false));
+    return () => cancelAnimationFrame(settle);
   }, []);
 
   const toggle = useCallback(() => {

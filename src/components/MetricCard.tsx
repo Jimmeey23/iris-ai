@@ -14,8 +14,10 @@ function useCountUp(target: number, ms = 700) {
   const [v, setV] = useState(0);
   useEffect(() => {
     if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      setV(target);
-      return;
+      // Settle on the next frame rather than synchronously inside the effect:
+      // same result, no cascading render before the paint.
+      const done = requestAnimationFrame(() => setV(target));
+      return () => cancelAnimationFrame(done);
     }
     let raf = 0;
     const start = performance.now();

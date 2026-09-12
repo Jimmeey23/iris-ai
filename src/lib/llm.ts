@@ -444,6 +444,12 @@ export async function chatWithTools(call: {
   sessionId?: string;
   streamField?: string;
   onFieldDelta?: (text: string) => void;
+  /**
+   * Stable identifier for the request prefix that does not change between
+   * steps or turns (system prompt + tool schemas). OpenAI caches that prefix
+   * server-side, which cuts both latency and cost on a multi-step turn.
+   */
+  cacheKey?: string;
 }): Promise<ToolTurnResult> {
   const started = Date.now();
   const key = await getOpenAiKey();

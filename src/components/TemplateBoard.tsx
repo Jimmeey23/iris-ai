@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNow } from "@/lib/use-now";
 import type { Studio } from "@/db/schema";
 import { TEMPLATES, TEMPLATE_GROUPS, RATING_OPTIONS, type Template, type TemplateField } from "@/lib/templates";
 import { useUser } from "./Providers";
@@ -34,6 +35,7 @@ export default function TemplateBoard({
   studios: Studio[];
   custom?: CustomTemplate[];
 }) {
+  const now = useNow();
   const { user } = useUser();
   const [group, setGroup] = useState<string>("all");
   const [q, setQ] = useState("");
@@ -138,6 +140,9 @@ export default function TemplateBoard({
 
   const onPick = (field: TemplateField, r: PickResult) => {
     const meta = r.meta ?? {};
+    // The clock is read from the shared ticking store rather than inside the
+    // state updater, which React may run during a render.
+    const pickedAt = now;
     if (field.kind === "member") {
       set({ [field.name]: r.value, memberName: r.label, memberId: String(meta.memberId ?? ""), memberContact: String(meta.email ?? meta.phone ?? "") });
     } else if (field.kind === "trainer") {
@@ -156,7 +161,7 @@ export default function TemplateBoard({
         classAt: r.label.split(" · ").slice(1).join(" · "),
         trainerName: v.trainerName || String(meta.teacher ?? ""),
         studioName: v.studioName || String(meta.location ?? ""),
-        scheduledStart: v.scheduledStart || new Date(String(meta.startsAt ?? Date.now())).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }),
+        scheduledStart: v.scheduledStart || new Date(String(meta.startsAt ?? pickedAt)).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }),
       });
       if (active?.special === "hosted-class" && sessionId) void loadRoster(sessionId);
     }

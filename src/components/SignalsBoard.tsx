@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { EmptyState, Panel } from "./ui";
 import type { ForecastBundle, Signal } from "@/lib/forecast";
 import { apiFetch } from "@/lib/api-client";
+import { useNow } from "@/lib/use-now";
 
 type Payload = ForecastBundle & { narrative: string; engine: string };
 
@@ -69,16 +70,24 @@ function ForecastChart({ series }: { series: Payload["volume"]["series"] }) {
 }
 
 export default function SignalsBoard() {
+  // The SLA countdown ticks on its own; reading Date.now() during render would
+  // make the row depend on when React last happened to re-render.
+  const now = useNow();
   const [win, setWin] = useState(60);
   const [data, setData] = useState<Payload | null>(null);
-  const [loading, setLoading] = useState(true);
+
+
+  // Loading is derived from which window the data belongs to: the fetch effect
+  // only ever writes state when the response lands, so switching the window
+  // shows the skeleton immediately without a cascading render.
+  const [loadedWin, setLoadedWin] = useState<number | null>(null);
+  const loading = loadedWin !== win;
 
   const load = useCallback(() => {
-    setLoading(true);
     apiFetch<Payload>(`/api/signals?window=${win}`)
       .then((d) => setData(d))
       .catch(() => setData(null))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedWin(win));
   }, [win]);
 
   useEffect(() => { load(); }, [load]);
@@ -253,7 +262,7 @@ export default function SignalsBoard() {
             ) : (
               <div className="divide-y hairline">
                 {slaRisk.atRisk.map((t) => {
-                  const hours = t.slaDueAt ? Math.max(0, Math.round((new Date(t.slaDueAt).getTime() - Date.now()) / 3600000)) : 0;
+                  const hours = t.slaDueAt ? Math.max(0, Math.round((new Date(t.slaDueAt).getTime() - now) / 3600000)) : 0;
                   return (
                     <Link key={t.id} href={`/tickets/${t.id}`} className="row-reveal flex items-center gap-3 px-4 py-2.5 transition hover:bg-[var(--surface-3)]">
                       <div className="min-w-0 flex-1">

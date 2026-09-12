@@ -97,6 +97,10 @@ export type ChatMessage = {
   created?: {
     id: number;
     ticketNumber: string;
+    /** Title and studio travel with the card so a later turn can talk about
+     *  the live ticket without a round trip to the database. */
+    title: string;
+    studioName?: string;
     assigneeName: string | null;
     assigneeTeam: string | null;
     assigneeEmail: string | null;

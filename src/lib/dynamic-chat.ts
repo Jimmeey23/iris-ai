@@ -21,17 +21,17 @@ export type DynamicQuestion = {
 };
 
 const IMPACT_OPTIONS: ChatOption[] = [
-  { label: "Safety risk / classes blocked", value: "impact:safety", tone: "danger" },
-  { label: "Several members affected", value: "impact:many" },
-  { label: "One member / minor disruption", value: "impact:single" },
-  { label: "Suggestion or improvement", value: "impact:suggestion", tone: "ghost" },
+  { label: "Safety risk / classes blocked", value: "ans:impact|Safety risk / classes blocked", tone: "danger" },
+  { label: "Several members affected", value: "ans:impact|Several members affected" },
+  { label: "One member / minor disruption", value: "ans:impact|One member / minor disruption" },
+  { label: "Suggestion or improvement", value: "ans:impact|Suggestion or improvement", tone: "ghost" },
 ];
 
 const RAISED_FOR: ChatOption[] = [
-  { label: "A member reported it", value: "for:On behalf of a member" },
-  { label: "I noticed it myself", value: "for:Noticed by staff" },
-  { label: "Multiple members raised it", value: "for:Multiple members" },
-  { label: "Staff / trainer concern", value: "for:Staff or trainer concern" },
+  { label: "A member reported it", value: "ans:raisedFor|On behalf of a member" },
+  { label: "I noticed it myself", value: "ans:raisedFor|Noticed by staff" },
+  { label: "Multiple members raised it", value: "ans:raisedFor|Multiple members" },
+  { label: "Staff / trainer concern", value: "ans:raisedFor|Staff or trainer concern" },
 ];
 
 /** Slot catalogue with sensible defaults; prompts get rewritten per context. */
@@ -70,20 +70,20 @@ function baseQuestion(slot: SlotId): DynamicQuestion {
         allowFreeText: true,
         picker: "session",
         placeholder: "Search recent sessions…",
-        options: CLASS_FORMATS.slice(0, 5).map((c) => ({ label: c, value: `class:${c}` })),
+        options: CLASS_FORMATS.slice(0, 5).map((c) => ({ label: c, value: `ans:classInfo|${c}` })),
       };
     case "location":
       return {
         slot,
         prompt: "Where in the studio?",
-        options: STUDIO_AREAS.slice(0, 8).map((a) => ({ label: a, value: `loc:${a}` })),
+        options: STUDIO_AREAS.slice(0, 8).map((a) => ({ label: a, value: `ans:location|${a}` })),
         allowFreeText: true,
       };
     case "systemAffected":
       return {
         slot,
         prompt: "Which system or device is affected?",
-        options: SYSTEMS.map((s) => ({ label: s, value: `sys:${s}` })),
+        options: SYSTEMS.map((s) => ({ label: s, value: `ans:systemAffected|${s}` })),
         allowFreeText: true,
       };
     case "membershipRef":
@@ -99,7 +99,7 @@ function baseQuestion(slot: SlotId): DynamicQuestion {
       return {
         slot,
         prompt: "When did this happen?",
-        options: OCCURRED_OPTIONS.map((o) => ({ label: o, value: `when:${o}` })),
+        options: OCCURRED_OPTIONS.map((o) => ({ label: o, value: `ans:occurredAt|${o}` })),
         allowFreeText: false,
       };
     case "impact":
@@ -109,8 +109,8 @@ function baseQuestion(slot: SlotId): DynamicQuestion {
         slot,
         prompt: "Is anyone at risk or is this still happening right now?",
         options: [
-          { label: "Yes — act immediately", value: "risk:yes", tone: "danger" },
-          { label: "No immediate risk", value: "risk:no" },
+          { label: "Yes — act immediately", value: "ans:atRisk|Yes", tone: "danger" },
+          { label: "No immediate risk", value: "ans:atRisk|No" },
         ],
         allowFreeText: false,
       };
@@ -119,9 +119,9 @@ function baseQuestion(slot: SlotId): DynamicQuestion {
         slot,
         prompt: "Is this a one-off or has it happened before?",
         options: [
-          { label: "First time", value: "freq:First time" },
-          { label: "Second or third time", value: "freq:Repeat — 2-3 times" },
-          { label: "Happens most weeks", value: "freq:Chronic — weekly" },
+          { label: "First time", value: "ans:frequency|First time" },
+          { label: "Second or third time", value: "ans:frequency|Repeat — 2-3 times" },
+          { label: "Happens most weeks", value: "ans:frequency|Chronic — weekly" },
         ],
         allowFreeText: false,
       };
@@ -229,15 +229,6 @@ export function planSlots(input: {
   });
 }
 
-const SLOT_PREFIX: Partial<Record<SlotId, string>> = {
-  impact: "impact",
-  location: "loc",
-  systemAffected: "sys",
-  occurredAt: "when",
-  frequency: "freq",
-  atRisk: "risk",
-};
-
 /** Impact wording differs per issue, but the stored key must stay stable. */
 const IMPACT_KEYS = ["safety", "many", "single", "suggestion"];
 
@@ -255,23 +246,22 @@ function applyProfileOverride(q: DynamicQuestion, category: string, subcategory:
     if (q.slot === "impact") {
       out.options = override.options.map((label, i) => ({
         label,
-        value: `impact:${IMPACT_KEYS[Math.min(i, IMPACT_KEYS.length - 1)]}`,
+        // The stored key must stay stable even when the wording changes.
+        value: `ans:impact|${IMPACT_KEYS[Math.min(i, IMPACT_KEYS.length - 1)]}`,
         tone: i === 0 ? ("danger" as const) : undefined,
       }));
     } else if (q.slot === "atRisk") {
       out.options = override.options.map((label, i) => ({
         label,
-        value: i === 0 ? "risk:yes" : "risk:no",
+        value: `ans:atRisk|${i === 0 ? "Yes" : "No"}`,
         tone: i === 0 ? ("danger" as const) : undefined,
       }));
       out.allowFreeText = false;
     } else {
-      const prefix = SLOT_PREFIX[q.slot];
       out.options = override.options.map((label) => ({
         label,
-        value: prefix ? `${prefix}:${label}` : label,
+        value: `ans:${q.slot}|${label}`,
       }));
-      if (!prefix) out.allowFreeText = true;
     }
   }
   return out;

@@ -15,9 +15,18 @@ import {
   type SlotSource,
 } from "./chat-engine";
 import { CATEGORY_DEPARTMENT } from "./org";
-import { CATEGORY_META } from "./taxonomy";
+import { CATEGORIES as CATEGORY_LIST, CATEGORY_META } from "./taxonomy";
 import { applyComposerContext, inferFromText, IMPACT_LABEL } from "./chat-inference";
-import { runAgent, generateSummary, questionOptions, CANONICAL_SLOTS, type AgentContext, type AgentQuestion } from "./agent";
+import { runAgent, generateSummary, questionOptions, type AgentContext, type AgentQuestion } from "./agent";
+import {
+  CANONICAL_SLOT_IDS,
+  applySlotAnswer,
+  impactKeyFromLabel,
+  optionValueToWords,
+  parseOptionValue as parseSharedOptionValue,
+  type SlotAnswerData,
+} from "./slot-answers";
+import { profileFor, type SlotOverride } from "./question-bank";
 import { missingRequired, normaliseRaisedFor, questionBudget } from "./guardrails";
 import { issueKnowledgeBlock, suggestOwner } from "./issue-knowledge";
 import { insightFromAgent } from "./enrich";
@@ -45,7 +54,7 @@ export function isGreetingOnly(text: string): boolean {
 }
 
 /** Steps owned by the deterministic review / edit machinery, not the agent. */
-const DETERMINISTIC_STEPS = new Set(["review", "edit_menu", "created"]);
+const DETERMINISTIC_STEPS = new Set(["review", "edit_menu"]);
 const DETERMINISTIC_VALUES = new Set(["approve", "edit", "restart", "new", "undo"]);
 
 function isDeterministic(state: IntakeState, input: EngineInput): boolean {
@@ -66,95 +75,92 @@ function isDeterministic(state: IntakeState, input: EngineInput): boolean {
 /* Structured input → state, and → words the agent can read            */
 /* ------------------------------------------------------------------ */
 
-const CANONICAL_SLOT_IDS = new Set<string>(CANONICAL_SLOTS);
-
 /**
- * Option answers, in two shapes: `ans:<slotId>|<label>` names the slot
- * explicitly (gates), and plain `ans:<label>` binds to the question currently
- * pending when that question is a canonical slot. Pure so the contract tests
- * can exercise it; `applyOptionAnswer` is the stateful wrapper.
+ * Option clicks and pickers, in two shapes: `ans:<slotId>|<label>` names the
+ * slot explicitly (every renderer emits this now), and the legacy pre-agent
+ * prefixes (`for:`, `class:`, `loc:`, `sys:`, `when:`, `impact:`, `risk:`,
+ * `freq:`) are still understood — an option value that reaches the agent path
+ * must never be a silent no-op. The mapping itself lives in `slot-answers`.
  */
 function resolveOptionAnswer(
   value: string,
   pendingQuestionId?: string | null,
 ): { slot?: string; label: string } {
-  if (!value.startsWith("ans:")) return { label: "" };
-  const rest = value.slice(4);
-  const sep = rest.indexOf("|");
-  let id: string;
-  let label: string;
-  if (sep !== -1) {
-    id = rest.slice(0, sep);
-    label = rest.slice(sep + 1);
-  } else {
-    label = rest;
-    const pending = pendingQuestionId ?? null;
-    if (!pending || !CANONICAL_SLOT_IDS.has(pending)) return { label };
-    id = pending;
-  }
-  if (!id || !label) return { label };
-  return { slot: id === "resolved" ? "resolvedNow" : id, label };
+  return parseSharedOptionValue(value, pendingQuestionId);
 }
 
 function absorbExplicitAnswer(
   value: string,
   s: IntakeState,
-): { slot: string; label: string } | null {
-  const result = resolveOptionAnswer(value, s.pendingQuestionId ?? null);
+  ctx: EngineContext,
+  pendingQuestionId?: string | null,
+): { slot?: string; label: string } | null {
+  const result = resolveOptionAnswer(value, pendingQuestionId ?? s.pendingQuestionId ?? null);
   if (!result.slot) return null;
-  applyAnswerToSlot(result.slot, result.label, s);
-  markSlotSource(s, result.slot, "user");
-  return { slot: result.slot, label: result.label };
-}
-
-/** Deterministic mapping from a canonical slot id to a tapped option label. */
-function applyAnswerToSlot(slot: string, label: string, s: IntakeState): void {
   const d = s.data;
-  const v = label.trim();
-  if (!v) return;
-  switch (slot) {
-    case "raisedFor": d.raisedFor = normaliseRaisedFor(v); break;
-    case "impact": {
-      // Option labels are English sentences; the stored value is the stable key.
-      const key = ["safety", "many", "single", "suggestion"].find((k) =>
-        k === "many"
-          ? /several|many|multiple/i.test(v)
-          : k === "single"
-            ? /one member|minor|single/i.test(v)
-            : v.toLowerCase().includes(k),
-      );
-      // A skip-style label ("Not applicable") must not invent a wrong impact.
-      if (key) d.impact = key;
-      break;
-    }
-    case "resolvedNow": {
-      // Anchored, prefix-tolerant: gate labels are sentences like
-      // "Yes — resolved" / "No — still happening".
-      const t = v.trim().toLowerCase();
-      d.resolvedNow = /^(true|yes|resolved|fixed|fine)/.test(t)
-        ? true
-        : /^(false|no|not|still|unresolved|happening)/.test(t)
-          ? false
-          : d.resolvedNow;
-      break;
-    }
-    case "atRisk": d.atRisk = /^(yes|true)/i.test(v); break;
-    case "plannedWork": d.plannedWork = /^(yes|true)/i.test(v); break;
-    case "frequency": d.frequency = v; break;
-    case "occurredAt": d.occurredAt = v; break;
-    case "location": d.location = v; break;
-    case "systemAffected": d.systemAffected = v; break;
-    case "classInfo": d.classInfo = v; break;
-    case "membershipRef": d.membershipRef = v; break;
-    case "trainer": d.trainerName = v; break;
-    case "member": d.memberName = v; break;
-    case "memberContact": d.memberContact = v; break;
-    case "actionTaken": d.actionTaken = v; break;
-    case "witnesses": d.witnesses = v; break;
-    case "amount": d.amount = v; break;
-    case "notes": d.notes = v; break;
-    default: break; // custom:* and unknown ids ride along as words only
+
+  // Classification and studio have their own deterministic setters.
+  if (result.slot === "category") {
+    const canonical = CATEGORY_LIST.find((c) => c.toLowerCase() === result.label.trim().toLowerCase());
+    if (!canonical) return { label: result.label };
+    d.category = canonical;
+    d.subcategory = undefined;
+    markSlotSource(s, "category", "user");
+    return { slot: "category", label: optionValueToWords(value) || result.label };
   }
+  if (result.slot === "subcategory") {
+    d.subcategory = result.label.trim();
+    markSlotSource(s, "subcategory", "user");
+    return { slot: "subcategory", label: optionValueToWords(value) || result.label };
+  }
+  if (result.slot === "studio") {
+    if (/not studio/i.test(result.label)) {
+      d.studioId = null;
+      d.studioName = "Not studio specific";
+    } else {
+      // `studio:<id>` (the gate buttons) and `studio:<id>:<name>` (the picker)
+      // carry a real id; a typed or model-written name is resolved instead.
+      const byId = ctx.studios.find((st) => st.id === Number(result.label.trim()));
+      const match = byId ?? resolveStudio(result.label, ctx.studios);
+      if (!match) return { label: result.label };
+      d.studioId = match.id;
+      d.studioName = match.name;
+    }
+    markSlotSource(s, "studio", "user");
+    return { slot: "studio", label: optionValueToWords(value, d.studioName) || result.label };
+  }
+  if (result.slot === "member") {
+    const [, id, ...rest] = value.split(":");
+    const numeric = Number(id);
+    if (Number.isFinite(numeric) && rest.length > 0) {
+      d.momenceMemberId = numeric;
+      d.memberName = rest.join(":");
+    } else {
+      d.memberName = result.label;
+    }
+    markSlotSource(s, ["member", "momenceMemberId"], "user");
+    return { slot: "member", label: `The member is ${d.memberName}.` };
+  }
+  if (result.slot === "classInfo" && value.startsWith("session:")) {
+    const [, id, ...rest] = value.split(":");
+    const [name, at, teacher] = rest.join(":").split("|");
+    d.momenceSessionId = Number(id);
+    d.classInfo = name;
+    if (at) d.classAt = at;
+    if (teacher && !d.trainerName) d.trainerName = teacher;
+    markSlotSource(s, ["momenceSessionId", "classInfo"], "user");
+    return {
+      slot: "classInfo",
+      label: `The class was ${[name, at, teacher && `taught by ${teacher}`].filter(Boolean).join(", ")}.`,
+    };
+  }
+
+  const wrote = applySlotAnswer(result.slot, result.label, d as SlotAnswerData);
+  // Only a write that actually happened may be recorded as human intent — the
+  // old code marked the slot human-set even when the switch stored nothing.
+  if (!wrote) return { slot: result.slot, label: result.label };
+  markSlotSource(s, result.slot === "trainer" ? "trainerName" : result.slot, "user");
+  return { slot: result.slot, label: optionValueToWords(value) || result.label };
 }
 
 /**
@@ -166,13 +172,16 @@ export function applyOptionAnswer(
   value: string,
   s: IntakeState,
   pendingQuestionId?: string | null,
+  studios: EngineContext["studios"] = [],
 ): { slot?: string; label: string } {
-  const result = resolveOptionAnswer(value, pendingQuestionId);
-  if (result.slot) {
-    applyAnswerToSlot(result.slot, result.label, s);
-    markSlotSource(s, result.slot, "user");
-  }
-  return result;
+  const result = absorbExplicitAnswer(
+    value,
+    s,
+    { studios, reporter: { name: "", role: "" } },
+    pendingQuestionId,
+  );
+  if (result) return { slot: result.slot, label: result.label };
+  return parseSharedOptionValue(value, pendingQuestionId);
 }
 
 /**
@@ -190,12 +199,16 @@ function absorbInput(
   const d = s.data;
   const inferred = input.context ? applyComposerContext(input.context, s) : [];
 
-  const explicit = absorbExplicitAnswer(value, s);
+  const explicit = absorbExplicitAnswer(value, s, ctx);
   if (explicit) {
     return { utterance: explicit.label, inferred };
   }
 
-  if (value.startsWith("ans:")) return { utterance: value.slice(4), inferred };
+  // Any other structured value — including a `custom:` answer with no field to
+  // write — still has to become words. An empty utterance here is the silent
+  // no-op that made clicks look ignored.
+  const parsed = parseSharedOptionValue(value, s.pendingQuestionId ?? null);
+  if (parsed.label) return { utterance: parsed.label, inferred };
 
   // Multi-select Momence answers. One incident routinely spans several classes,
   // so these carry the whole selection: "sessions:<id>|<label>;;<id>|<label>".
@@ -248,83 +261,8 @@ function absorbInput(
     }
   }
 
-  if (value === "resolvedNow:yes" || value === "resolvedNow:no") {
-    d.resolvedNow = value === "resolvedNow:yes";
-    markSlotSource(s, "resolvedNow", "user");
-    return {
-      utterance: d.resolvedNow ? "It is resolved / fixed now." : "It is still happening — not resolved.",
-      inferred,
-    };
-  }
-
-  if (value.startsWith("studio:")) {
-    const rest = value.slice(7);
-    markSlotSource(s, "studio", "user");
-    if (rest === "none") {
-      d.studioId = null;
-      d.studioName = "Not studio specific";
-      return { utterance: "Not studio specific.", inferred };
-    }
-    const studio = ctx.studios.find((st) => st.id === Number(rest));
-    if (studio) {
-      d.studioId = studio.id;
-      d.studioName = `${studio.name}, ${studio.city}`;
-      return { utterance: `The studio is ${d.studioName}.`, inferred };
-    }
-  }
-
-  if (value.startsWith("member:")) {
-    const [, id, ...rest] = value.split(":");
-    const numeric = Number(id);
-    if (Number.isFinite(numeric) && rest.length > 0) {
-      d.momenceMemberId = numeric;
-      d.memberName = rest.join(":");
-    } else {
-      d.memberName = value.slice(7);
-    }
-    markSlotSource(s, ["member", "momenceMemberId"], "user");
-    return { utterance: `The member is ${d.memberName}.`, inferred };
-  }
-
-  if (value.startsWith("session:")) {
-    const [, id, ...rest] = value.split(":");
-    d.momenceSessionId = Number(id);
-    const [name, at, teacher] = rest.join(":").split("|");
-    d.classInfo = name;
-    if (at) d.classAt = at;
-    if (teacher && !d.trainerName) d.trainerName = teacher;
-    markSlotSource(s, ["momenceSessionId", "classInfo"], "user");
-    return {
-      utterance: `The class was ${[name, at, teacher && `taught by ${teacher}`].filter(Boolean).join(", ")}.`,
-      inferred,
-    };
-  }
-
-  if (value.startsWith("trainer:")) {
-    d.trainerName = value.slice(8);
-    markSlotSource(s, "trainerName", "user");
-    return { utterance: `The trainer was ${d.trainerName}.`, inferred };
-  }
-
-  if (value.startsWith("membership:") || value.startsWith("mem:")) {
-    d.membershipRef = value.replace(/^(membership|mem):/, "");
-    markSlotSource(s, "membershipRef", "user");
-    return { utterance: `Membership: ${d.membershipRef}.`, inferred };
-  }
-
   if (value === "skip") return { utterance: "Skip that one.", inferred };
   if (value === "browse") return { utterance: "Let me pick the category myself.", inferred };
-  if (value.startsWith("cat:")) {
-    d.category = value.slice(4);
-    d.subcategory = undefined;
-    markSlotSource(s, "category", "user");
-    return { utterance: `File this under ${d.category}.`, inferred };
-  }
-  if (value.startsWith("sub:")) {
-    d.subcategory = value.slice(4);
-    markSlotSource(s, "subcategory", "user");
-    return { utterance: `The subcategory is ${d.subcategory}.`, inferred };
-  }
 
   return { utterance: text, inferred };
 }
@@ -363,11 +301,9 @@ function bindPendingTextAnswer(text: string, s: IntakeState, ctx: EngineContext)
     else if (/^(no|still|not|unresolved)\b/i.test(answer)) s.data.resolvedNow = false;
     else return;
   } else if (pending === "impact") {
-    applyAnswerToSlot(pending, answer, s);
-    if (s.data.impact === undefined) return;
+    if (!applySlotAnswer("impact", answer, s.data as SlotAnswerData)) return;
   } else if (pending === "atRisk") {
-    if (!/^(yes|no|true|false)\b/i.test(answer)) return;
-    s.data.atRisk = /^(yes|true)\b/i.test(answer);
+    if (!applySlotAnswer("atRisk", answer, s.data as SlotAnswerData)) return;
   } else if (pending === "studio") {
     // The studio question renders buttons, so a click always worked — but a
     // reporter who types "Kwality House, Kemps Corner" was answering the same
@@ -379,7 +315,7 @@ function bindPendingTextAnswer(text: string, s: IntakeState, ctx: EngineContext)
     s.data.studioId = match.id;
     s.data.studioName = match.name;
   } else if (TEXT_ANSWER_SLOTS.has(pending)) {
-    applyAnswerToSlot(pending, answer, s);
+    applySlotAnswer(pending, answer, s.data as SlotAnswerData);
   } else {
     return;
   }
@@ -415,7 +351,8 @@ export function resolveStudio(
     let score = 0;
     if (said === name) score = 100;
     else if (said.includes(name) || name.includes(said)) score = 50;
-    if (norm(studio.code) === said) score = Math.max(score, 90);
+    // A studio row with no short code must not take the whole turn down.
+    if (studio.code && norm(studio.code) === said) score = Math.max(score, 90);
 
     for (const word of name.split(" ")) {
       if (word.length > 2 && !generic.has(word) && saidWords.has(word)) score += 10;
@@ -439,6 +376,8 @@ function applySlots(
     const v = entry?.value;
     if (v === null || v === undefined || v === "") continue;
     const str = typeof v === "boolean" ? String(v) : v;
+    const quote = (entry as { quote?: string }).quote?.trim();
+    if (quote) s.slotQuotes = { ...(s.slotQuotes ?? {}), [slot]: quote.slice(0, 240) };
 
     switch (slot) {
       case "studio": {
@@ -719,6 +658,7 @@ export function matchSession(
 function knownForAgent(s: IntakeState): {
   known: Record<string, string>;
   humanLocked: string[];
+  quotes: Record<string, string>;
 } {
   const d = s.data;
   const known: Record<string, string> = {};
@@ -756,7 +696,7 @@ function knownForAgent(s: IntakeState): {
   put("amount", d.amount);
   put("notes", d.notes);
   for (const [k, v] of Object.entries(d.extraDetails ?? {})) put(k, v);
-  return { known, humanLocked };
+  return { known, humanLocked, quotes: { ...(s.slotQuotes ?? {}) } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -771,6 +711,92 @@ function studioOptions(ctx: EngineContext): ChatOption[] {
   if (hq) opts.push({ label: hq.name, value: `studio:${hq.id}`, hint: hq.city });
   opts.push({ label: "Not studio specific", value: "studio:none", tone: "ghost" });
   return opts;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fallback questions — curated per issue, never a device-symptom ladder */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Slots worth asking about when a report is too thin to action and the model
+ * believes it is complete. The curated per-issue wording in `question-bank` is
+ * tried first; this is the generic order behind it.
+ */
+const THIN_ASK_SLOTS = [
+  "location", "systemAffected", "classInfo", "occurredAt", "frequency",
+  "actionTaken", "witnesses", "amount", "impact", "memberContact",
+] as const;
+
+/** Plain wording for a slot the curated bank has nothing specific to say about. */
+const THIN_ASK_WORDING: Record<string, string> = {
+  location: "Where in the studio is it?",
+  systemAffected: "Which piece of kit or system is it?",
+  classInfo: "Which class or format did this affect?",
+  occurredAt: "When did this start, and is it still the case now?",
+  frequency: "Is this the first time, or has it happened before?",
+  actionTaken: "Has anyone done anything about it yet?",
+  witnesses: "Who else was there when it happened?",
+  amount: "Is there a value or amount involved?",
+  impact: "Who has this affected so far?",
+  memberContact: "Is there a member this relates to, and the best way to reach them?",
+};
+
+/**
+ * One question for a report that is genuinely too thin to act on.
+ *
+ * The previous ladder asked "is it dead, cutting out, distorted, or something
+ * else?" of every thin report in six categories — including a stolen handbag,
+ * because the ladder never read the report. This asks what the curated profile
+ * for *this* issue says an owner needs, and returns nothing when the bank has
+ * nothing better to offer than the model's own judgement. Falling back to the
+ * draft is better than asking a question that makes no sense.
+ */
+function thinReportQuestion(s: IntakeState): AgentQuestion | null {
+  const d = s.data;
+  const profile = profileFor(d.category ?? "", d.subcategory ?? "");
+  const dropped = new Set<string>(profile.dropSlots ?? []);
+  const known: Record<string, unknown> = {
+    location: d.location,
+    systemAffected: d.systemAffected,
+    classInfo: d.classInfo,
+    occurredAt: d.occurredAt,
+    frequency: d.frequency,
+    actionTaken: d.actionTaken,
+    witnesses: d.witnesses,
+    amount: d.amount,
+    impact: d.impact,
+    memberContact: d.memberContact,
+  };
+  // The issue's own slots come first, in the order the bank's author listed
+  // them: the subcategory's `slots` are the asks that define this issue — a mic
+  // fault asks which piece of kit before it asks which room — then the softer
+  // `extraSlots`, then the generic order. Asking the generic list first buries
+  // the question that actually belongs to the issue.
+  const candidates: string[] = [
+    ...new Set<string>([...Object.keys(profile.slots ?? {}), ...(profile.extraSlots ?? []), ...THIN_ASK_SLOTS]),
+  ];
+  for (const slot of candidates) {
+    if (dropped.has(slot)) continue;
+    if (known[slot] !== undefined) continue;
+    if ((s.agentAsked ?? []).includes(slot)) continue;
+    const override = (profile.slots as Record<string, SlotOverride> | undefined)?.[slot];
+    const ask = override?.prompt ?? THIN_ASK_WORDING[slot];
+    if (!ask) continue;
+    const options = override?.options?.map((label) => ({
+      label,
+      // Impact wording changes per issue but the stored key must not.
+      value: slot === "impact" ? `ans:impact|${impactKeyFromLabel(label) ?? "many"}` : `ans:${slot}|${label}`,
+    }));
+    return {
+      id: slot,
+      ask,
+      why: override?.helper,
+      allowFreeText: true,
+      placeholder: override?.placeholder,
+      options,
+    };
+  }
+  return null;
 }
 
 /**
@@ -837,7 +863,19 @@ export type AgentTurnResult = EngineResult & {
    * so the caller can persist a transcript the agent can re-read next turn.
    */
   userUtterance?: string;
+  /** Set on a post-creation turn: the change to make to the live ticket. */
+  intent?: PostCreationIntent;
 };
+
+/**
+ * What a message sent after the ticket exists decided to do. The controller can
+ * see it; the caller applies it (the engine layer has no database access, and
+ * the mutation must be permission-checked against the session row that actually
+ * raised the ticket).
+ */
+export type PostCreationIntent =
+  | { kind: "amend"; ticketId: number; update: string; amendmentKind?: string; priority?: string }
+  | { kind: "followup"; ticketId: number; title: string; summary: string; category: string; subcategory: string; priority?: string };
 
 export type TurnHooks = {
   /** Progress notes for a streaming client: what the agent is doing right now. */
@@ -850,6 +888,166 @@ export type TurnHooks = {
    */
   onReplyRestart?: () => void;
 };
+
+/* ------------------------------------------------------------------ */
+/* Life after the ticket exists                                        */
+/* ------------------------------------------------------------------ */
+
+type LiveTicket = { id: number; ticketNumber: string; title: string; status: string; studioName?: string };
+
+/**
+ * The ticket this session raised, read from its own transcript — the `created`
+ * card carries the number, title and studio. Falls back to the state's id.
+ */
+function liveTicket(state: IntakeState, transcript: ChatMessage[]): LiveTicket | null {
+  const card = [...transcript].reverse().find((m) => m.kind === "created" && m.created)?.created;
+  const id = card?.id ?? state.createdTicketId;
+  if (id == null) return null;
+  return {
+    id,
+    ticketNumber: card?.ticketNumber ?? `ticket ${id}`,
+    title: card?.title ?? state.data.category ?? "the ticket",
+    status: "Open",
+    studioName: card?.studioName ?? state.data.studioName,
+  };
+}
+
+/**
+ * One turn about a ticket that already exists.
+ *
+ * The model is handed the live ticket and may add an update to it, raise a
+ * separate linked one, or simply answer. Whatever it chooses, the reporter's
+ * words are never dropped: if the reasoning pass fails, the message is recorded
+ * on the ticket as a plain update rather than met with an error.
+ */
+async function runPostCreationTurn(
+  state: IntakeState,
+  transcript: ChatMessage[],
+  input: EngineInput,
+  ctx: EngineContext,
+  hooks: TurnHooks,
+): Promise<AgentTurnResult> {
+  const s: IntakeState = { ...state, data: { ...state.data } };
+  const ticket = liveTicket(state, transcript);
+  if (!ticket) return { ...handleInput(state, input, ctx), usedAgent: false };
+
+  const utterance = input.text?.trim() || (input.value ? optionValueToWords(input.value) : "");
+  const convo = [...transcript];
+  if (utterance) {
+    convo.push({
+      id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      role: "user",
+      content: utterance,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const toolsEnabled = await momenceAvailable().catch(() => false);
+  const { known, humanLocked, quotes } = knownForAgent(s);
+  const recentOpenings = transcript
+    .filter((m) => m.role === "assistant" && m.kind !== "draft" && m.content?.trim())
+    .slice(-2)
+    .map((m) => m.content.split(/\n|\. /)[0] ?? "");
+
+  const agentCtx: AgentContext = {
+    reporter: ctx.reporter,
+    studios: ctx.studios.map((st) => ({ id: st.id, name: st.name, city: st.city, isHq: st.isHq })),
+    known: {
+      ...known,
+      ticket: `${ticket.ticketNumber} — "${ticket.title}" (${ticket.status})`,
+    },
+    humanLocked,
+    quotes,
+    recentOpenings,
+    asked: [],
+    relatedTickets: [],
+    memoryFacts: [],
+    toolsEnabled,
+    toolResults: s.toolResults,
+    summaryCompression: s.contextSummary,
+    sessionId: input.sessionId,
+    ticket,
+  };
+
+  hooks.onStatus?.("Reading your update");
+  hooks.onReplyRestart?.();
+  const result = await runAgent(convo, agentCtx, {
+    onReplyDelta: hooks.onReplyDelta,
+    onLookup: (tool) => hooks.onStatus?.(`Checking ${tool.replace(/_/g, " ")} in Momence`),
+  });
+
+  s.step = "created";
+  s.pendingQuestionId = null;
+
+  const options: ChatOption[] = [{ label: "Raise another ticket", value: "new", tone: "ghost" }];
+
+  // A failed reasoning pass is not a reason to lose a correction: the words go
+  // onto the ticket as an update, and the reply says exactly that.
+  if (!result.ok || !result.turn) {
+    const update = utterance.trim();
+    if (update) {
+      s.agentFailures = 0;
+      return {
+        state: s,
+        usedAgent: true,
+        userUtterance: utterance,
+        model: result.model,
+        degraded: result.error ?? "agent-unavailable",
+        intent: { kind: "amend", ticketId: ticket.id, update, amendmentKind: "addition" },
+        messages: [
+          assistantMessage(
+            `Noted — I've added that to **${ticket.ticketNumber}** so it isn't lost. The reasoning service is unavailable right now, so I couldn't do more with it than record it.`,
+            { allowFreeText: true, options },
+          ),
+        ],
+      };
+    }
+    return {
+      state: s,
+      usedAgent: true,
+      userUtterance: utterance,
+      model: result.model,
+      degraded: result.error ?? "agent-unavailable",
+      messages: [
+        assistantMessage(
+          `I couldn't reach the reasoning service just now. **${ticket.ticketNumber}** is safe — try me again in a moment.`,
+          { allowFreeText: true, options },
+        ),
+      ],
+    };
+  }
+
+  const turn = result.turn;
+  const amendment = turn.amendment?.update?.trim();
+  const followUp = turn.followUpTicket?.title ? turn.followUpTicket : undefined;
+  const intent: PostCreationIntent | undefined = amendment
+    ? { kind: "amend", ticketId: ticket.id, update: amendment, amendmentKind: turn.amendment?.kind, priority: turn.amendment?.priority }
+    : followUp
+      ? {
+          kind: "followup",
+          ticketId: ticket.id,
+          title: followUp.title,
+          summary: followUp.summary,
+          category: followUp.category,
+          subcategory: followUp.subcategory,
+          priority: followUp.priority,
+        }
+      : undefined;
+
+  return {
+    state: s,
+    usedAgent: true,
+    userUtterance: utterance,
+    model: result.model,
+    intent,
+    messages: [
+      assistantMessage(turn.reply.trim() || "Got it — I've noted that on the ticket.", {
+        allowFreeText: true,
+        options,
+      }),
+    ],
+  };
+}
 
 export async function runAgentTurn(
   state: IntakeState,
@@ -864,6 +1062,15 @@ export async function runAgentTurn(
   }
   if (isDeterministic(state, input)) {
     return { ...handleInput(state, input, ctx), usedAgent: false };
+  }
+
+  // The ticket is already raised. Every further message used to be answered
+  // with "This ticket is already raised. Start a new one below." — the one
+  // moment a reporter most needs to say "actually it was Bandra, and the
+  // vendor came at 4", answered with a refusal. A live ticket is a
+  // conversation, so it gets one.
+  if (state.step === "created" && liveTicket(state, transcript)) {
+    return runPostCreationTurn(state, transcript, input, ctx, hooks);
   }
 
   const s: IntakeState = {
@@ -954,6 +1161,18 @@ export async function runAgentTurn(
   // teacher and its booking count in one model call instead of burning a
   // tool round-trip. Once per session; the post-turn matcher still runs on
   // these rows deterministically.
+  // The member record is the other lookup the model must never spend a question
+  // on, and it depends on nothing the model says. Resolve it here so the first
+  // pass already carries the real spelling, contact and package.
+  if (toolsEnabled && !s.memberLookupDone) {
+    const memberName = s.data.memberName?.trim();
+    if (memberName && !/anonymous|not specified/i.test(memberName)) {
+      hooks.onStatus?.("Finding the member in Momence");
+      s.memberLookupDone = true;
+      toolResults.push(...(await runTools([{ tool: "search_member", args: { query: memberName } }])));
+    }
+  }
+
   if (toolsEnabled && !s.autoLookupDone && !s.data.momenceSessionId && s.data.studioId != null) {
     const prefetch = sessionQuery(s, {}, ctx.studios);
     if (prefetch) {
@@ -984,12 +1203,20 @@ export async function runAgentTurn(
     memberName: s.data.memberName,
   }).catch(() => []);
 
-  const { known, humanLocked } = knownForAgent(s);
+  const { known, humanLocked, quotes } = knownForAgent(s);
+  // Repetition is the clearest tell of a scripted assistant, and a model cannot
+  // avoid repeating what it cannot see. The last two openings go with the turn.
+  const recentOpenings = transcript
+    .filter((m) => m.role === "assistant" && m.kind !== "draft" && m.content?.trim())
+    .slice(-2)
+    .map((m) => m.content.split(/\n|\. /)[0] ?? "");
   const agentCtx: AgentContext = {
     reporter: ctx.reporter,
     studios: ctx.studios.map((st) => ({ id: st.id, name: st.name, city: st.city, isHq: st.isHq })),
     known,
     humanLocked,
+    quotes,
+    recentOpenings,
     asked: s.agentAsked ?? [],
     questionBudget: budget,
     relatedTickets: related.map((r) => ({
@@ -1009,6 +1236,15 @@ export async function runAgentTurn(
     summaryCompression: s.contextSummary,
     sessionId: input.sessionId,
   };
+
+  // The summary that keeps a long intake coherent used to be generated only at
+  // draft time — after the conversation needed it. Kick it off alongside the
+  // model call (it is fast-tier and concurrent, so it costs no wall-clock) and
+  // attach it before the turn is persisted.
+  const summaryPromise =
+    convo.length > 10 && (s.summaryCovered ?? 0) < convo.length - 6
+      ? generateSummary(s.contextSummary, convo).catch(() => undefined)
+      : null;
 
   hooks.onStatus?.("Reading your report");
   hooks.onReplyRestart?.();
@@ -1106,6 +1342,13 @@ export async function runAgentTurn(
   if (result.turn.reportEstablished === false) {
     s.step = "describe";
     s.pendingQuestionId = null;
+    if (summaryPromise) {
+      const sum = await summaryPromise;
+      if (sum) {
+        s.contextSummary = sum;
+        s.summaryCovered = convo.length;
+      }
+    }
     return {
       state: s,
       usedAgent: true,
@@ -1117,42 +1360,31 @@ export async function runAgentTurn(
 
   applyTurnFacts(result.turn, s, ctx);
 
-  // There is no outer lookup loop any more: the agent calls Momence itself,
-  // mid-thought, and sees each result before deciding what to do next. What
-  // remains below are the two deterministic safety nets — resolve a named
-  // member once, and match a named class to a real session in code — because
-  // attaching the right ids matters more than whether the model remembered to.
-
-  // The model must never burn a question on facts Momence holds. When a member
-  // is named but has no id yet, resolve them once — the roster record carries
-  // the real spelling, contact and membership that the ticket should carry.
+  /* ---------------------------------------------------------------- *
+   * Deterministic safety net — and no extra reasoning pass.           *
+   *                                                                   *
+   * These two lookups used to run AFTER the model's pass and each     *
+   * triggered a fresh model call, so one message could cost three     *
+   * sequential reasoning passes — and each pass wiped the reply the    *
+   * reporter was already reading. They are cheap, deterministic and    *
+   * independent of the model's judgement, so the member search now     *
+   * runs before the first pass (above) and this only ever attaches     *
+   * data: ids, the real session label, and the rows for next turn.     *
+   * ---------------------------------------------------------------- */
   if (toolsEnabled && result.turn && !s.data.momenceMemberId && !s.memberLookupDone) {
     const memberName = s.data.memberName?.trim();
     if (memberName && !/anonymous|not specified/i.test(memberName)) {
       hooks.onStatus?.("Finding the member in Momence");
       s.memberLookupDone = true;
       toolResults.push(...(await runTools([{ tool: "search_member", args: { query: memberName } }])));
-      hooks.onReplyRestart?.();
-      const next = await runAgent(
-        convo,
-        { ...agentCtx, known: knownForAgent(s).known, toolResults },
-        { onReplyDelta: hooks.onReplyDelta },
-      );
-      if (next.ok && next.turn) result = next;
-      if (next.ok && next.turn) applyTurnFacts(next.turn, s, ctx);
     }
   }
 
-  // Resolving a named class to a real Momence session is the point of the
-  // integration, and the model does it only sometimes. So: make sure the lookup
-  // happens, then pick the row in code whenever the answer is unambiguous.
   if (toolsEnabled && result.turn && !s.data.momenceSessionId) {
     // Run our own lookup even if the model already made one: its search is
     // often unscoped or oddly worded, and comes back empty. Ours is filtered by
-    // the studio's Momence location and the day the report is about. Once per
-    // session, so a conversation cannot accumulate lookups.
+    // the studio's Momence location and the day the report is about.
     const named = s.autoLookupDone ? null : sessionQuery(s, result.turn.slots, ctx.studios);
-
     if (named) {
       hooks.onStatus?.("Matching the class in Momence");
       s.autoLookupDone = true;
@@ -1174,18 +1406,6 @@ export async function runAgentTurn(
         sessionId: hit.id,
         sessionName: hit.label,
       };
-    }
-
-    // Only worth another model call when we fetched something it has not seen.
-    if (named) {
-      hooks.onReplyRestart?.();
-      const next = await runAgent(
-        convo,
-        { ...agentCtx, known: knownForAgent(s).known, toolResults },
-        { onReplyDelta: hooks.onReplyDelta },
-      );
-      if (next.ok && next.turn) result = next;
-      if (next.ok && next.turn) applyTurnFacts(next.turn, s, ctx);
     }
   }
 
@@ -1226,10 +1446,35 @@ export async function runAgentTurn(
     ...turn.classification.alternates.map((a) => ({ ...a, confidence: 0.4 })),
   ];
 
-  const missing = missingRequired(s.data);
+  /* ---------------------------------------------------------------- *
+   * Question selection — ONE authority, and it is the model.          *
+   *                                                                   *
+   * The previous design ran nine gates in a row after the model       *
+   * landed, each able to replace, invent or delete its question. A    *
+   * model that had read the whole conversation and decided the report  *
+   * was complete could still be answered with a canned                   *
+   * "how many members were affected?". This is that ordering, done     *
+   * once, with the model's judgement first and code only as a          *
+   * fallback:                                                          *
+   *                                                                   *
+   *   1. a question about a fact we already hold is dropped — the      *
+   *      model may not ask what it already knows (it is told this,     *
+   *      and this is the guard)                                        *
+   *   2. an owner-critical gap the report genuinely left open is       *
+   *      rendered with the best affordance we have (studio buttons, a  *
+   *      real Momence session picker) — not replaced with a canned     *
+   *      question                                                     *
+   *   3. a machine-inferred blast radius is still confirmed once,      *
+   *      because it moves severity and the SLA clock                  *
+   *   4. a thin fault report that the model considered complete gets   *
+   *      ONE question drawn from the curated bank for its category     *
+   *   5. nothing else is ever invented. The draft is built.            *
+   * ---------------------------------------------------------------- */
+
+  const missing = missingRequired(s.data, s.data.category);
   let question = turn.nextQuestion;
-  // Extras belong to the model's own question. If a gate replaces it below,
-  // they are dropped rather than bolted onto a different ask.
+  // Extras belong to the model's own question. If the fallback below asks
+  // instead, they are dropped rather than bolted onto a different ask.
   const modelQuestionId = question?.id;
   const followUps = turn.followUps ?? [];
   const knownQuestionSlots: Record<string, unknown> = {
@@ -1252,30 +1497,34 @@ export async function runAgentTurn(
     amount: s.data.amount,
     notes: s.data.notes,
   };
+  const alreadyKnown = (id: string): boolean =>
+    id.startsWith("custom:") ? false : knownQuestionSlots[id] !== undefined;
 
-  // The controller is the final guard against asking for an established fact.
-  if (question && !question.id.startsWith("custom:") && knownQuestionSlots[question.id] !== undefined) {
+  // Step 1 — a question whose answer is on file, or which the reporter has
+  // already been asked, is not a question. The model still gets to decide how
+  // the conversation ends; it just cannot interrogate from behind.
+  if (question && alreadyKnown(question.id)) question = null;
+  if (
+    question &&
+    /resolv|still (ongoing|happening)|current status/i.test(`${question.id} ${question.ask}`) &&
+    s.data.resolvedNow !== undefined
+  ) {
     question = null;
   }
-  if (question && /resolv|still (ongoing|happening)|current status/i.test(`${question.id} ${question.ask}`) && s.data.resolvedNow !== undefined) {
-    question = null;
-  }
+  const askedBefore = new Set(s.agentAsked ?? []);
+  const repeated = Boolean(question && askedBefore.has(question.id));
 
   // Whether Momence can be asked "which classes, and who was in them" — that
   // decides whether the blast radius is a question for the reporter at all.
   const classSignal = hasClassSignal(narrative);
+  const operationalFault =
+    !s.data.plannedWork &&
+    ["Repair and Maintenance", "Tech Issues", "Operating Systems", "Safety and Security", "Class Experience"]
+      .includes(s.data.category ?? "");
 
-  /* ---------------------------------------------------------------- *
-   * The model's question wins.                                        *
-   *                                                                   *
-   * It has read the whole conversation; the deterministic gates below *
-   * have read a category string. Replacing its question with a canned *
-   * one is what made Iris feel like a form — the reporter describes a *
-   * renovation and gets "Is this resolved now?" because the category  *
-   * matched a list. So the model's question is only ever REFINED here *
-   * (a real picker, real options, the right slot id), and the gates   *
-   * run solely when it asked nothing at all.                          *
-   * ---------------------------------------------------------------- */
+  const questionBudgetLeft = (s.agentAsked?.length ?? 0) < budget;
+  const asked = (id: string): boolean => !(s.agentAsked ?? []).includes(id);
+
   const IMPACT_CHOICES = [
     "Safety risk / classes blocked",
     "Several members affected",
@@ -1283,15 +1532,16 @@ export async function runAgentTurn(
     "Suggestion or idea",
   ].map((label) => ({ label, value: `ans:impact|${label}` }));
   const RESOLVED_CHOICES = [
-    { label: "Resolved / fixed now", value: "ans:resolved|Yes — resolved" },
-    { label: "Still happening", value: "ans:resolved|No — still happening" },
+    { label: "Resolved / fixed now", value: "ans:resolvedNow|Yes — resolved" },
+    { label: "Still happening", value: "ans:resolvedNow|No — still happening" },
   ];
 
+  /* Step 2 — the affordance pass. The model's own question keeps its wording;
+     code only upgrades how it can be answered, which is the difference between
+     typing a class name and tapping the real session off the timetable. */
   if (question) {
     const subject = `${question.id} ${question.ask}`;
     const canPickSessions = toolsEnabled && classSignal;
-    // Give the model's own question the best answering affordance we have, so
-    // asking "which class was it?" opens the timetable instead of a text box.
     if (/studio|which site|which location/i.test(subject) && missing.includes("studio")) {
       question = { ...question, id: "studio", allowFreeText: false };
     } else if (canPickSessions && /which class|what class|which session|which classes/i.test(subject)) {
@@ -1308,36 +1558,21 @@ export async function runAgentTurn(
     }
   }
 
-  // Owner-critical gates. These fill a void: the model decided it had nothing
-  // to ask, but a fact the owner cannot act without is still missing. Ordered
-  // by what changes the owner's next move, most consequential first.
+  /* Step 3 — owner-critical gate. Only ever fires when the model asked nothing
+     at all, so it can add a missing question but never overrule one. */
   const GATE_ASK: Record<string, string> = {
     studio: "Which studio does this relate to?",
     impact: "How wide is the impact — safety risk, several members, one member, or a suggestion?",
     resolvedNow: "Is this resolved now, or still happening?",
   };
-  if (!question) {
-    // "Is this resolved now, or still happening?" is a question about a fault.
-    // Asked about a renovation that starts next week it is nonsense, and it is
-    // the reporter's first impression of how well Iris read them. Scheduled
-    // work is never an operational fault.
-    const operationalFault =
-      !s.data.plannedWork &&
-      [
-        "Repair and Maintenance", "Tech Issues", "Operating Systems",
-        "Safety and Security", "Class Experience",
-      ].includes(s.data.category ?? "");
-    // Impact is deliberately NOT gated here when Momence can answer it: the
-    // roster of the affected sessions gives a real count, so asking the
-    // reporter to characterise the blast radius first is a worse question. It
-    // is applied further down, only if the pickers could not settle it.
+  if (!question && !repeated) {
     const relevantGates = [
       "studio",
       ...(operationalFault ? ["resolvedNow"] : []),
       ...(toolsEnabled && classSignal ? [] : ["impact"]),
     ] as readonly string[];
     for (const gate of relevantGates) {
-      if (!missing.includes(gate) || (s.agentAsked ?? []).includes(gate)) continue;
+      if (!missing.includes(gate) || !asked(gate)) continue;
       question = {
         id: gate,
         ask: GATE_ASK[gate],
@@ -1354,12 +1589,7 @@ export async function runAgentTurn(
 
   // Scheduled work has its own owner-critical gap, and it is not "is it fixed":
   // it is when, and whether the classes in that window have been dealt with.
-  if (
-    !question &&
-    s.data.plannedWork &&
-    !s.data.plannedWindow &&
-    !(s.agentAsked ?? []).includes("custom:planned_window")
-  ) {
+  if (!question && s.data.plannedWork && !s.data.plannedWindow && asked("custom:planned_window")) {
     question = {
       id: "custom:planned_window",
       ask: "What are the exact dates — when does it start, and how long is it out for?",
@@ -1369,20 +1599,12 @@ export async function runAgentTurn(
     };
   }
 
-  // When Momence can answer "which classes" and "who was in them", asking the
-  // reporter to confirm real rows beats parsing their prose. A regex reading of
-  // "BBB at 10, cycle at 10.30, FIT at 11" produces a string nobody can act on
-  // and no session ids; the timetable produces both. Only the reporter can say
-  // which of those rows the problem actually hit, so this is a pick, not a
-  // lookup — and for a multi-class incident it has to be a multi-pick.
+  /* Step 4 — the session and attendee pickers. A regex reading of "BBB at 10,
+     cycle at 10.30, FIT at 11" produces a string nobody can act on and no
+     session ids; the timetable produces both. Only the reporter can say which
+     of those rows the problem hit, so this is a pick, not a lookup. */
   const sessionsUnconfirmed = s.data.momenceSessionIds === undefined;
-  if (
-    !question &&
-    toolsEnabled &&
-    classSignal &&
-    sessionsUnconfirmed &&
-    !(s.agentAsked ?? []).includes("sessions")
-  ) {
+  if (!question && toolsEnabled && classSignal && sessionsUnconfirmed && asked("sessions")) {
     question = {
       id: "sessions",
       ask: "Which classes did this hit? Tick every one from the timetable.",
@@ -1396,7 +1618,7 @@ export async function runAgentTurn(
     toolsEnabled &&
     s.data.momenceSessionIds?.length &&
     s.data.affectedMembers === undefined &&
-    !(s.agentAsked ?? []).includes("attendees")
+    asked("attendees")
   ) {
     question = {
       id: "attendees",
@@ -1408,16 +1630,17 @@ export async function runAgentTurn(
     };
   }
 
-  // An INFERRED blast radius is a guess, and it moves severity, the SLA clock
-  // and who gets paged. The gates above only fire when a slot is missing, so a
-  // model that confidently wrote impact="many" from a report about one attendee
-  // silently satisfies the gate that exists to catch exactly that. When the
-  // guess is one of the two that escalate, confirm it once.
+  /* Step 5 — an inferred blast radius is a guess, and it moves severity, the
+     SLA clock and who gets paged. Confirmed once, and only for a live fault:
+     "how wide is the impact" asked about a compliment is the question that
+     made the assistant feel like a form. */
   if (
     !question &&
+    operationalFault &&
+    !s.data.plannedWork &&
     (s.data.impact === "many" || s.data.impact === "safety") &&
     slotSource(s, "impact") === "agent" &&
-    !(s.agentAsked ?? []).includes("impact")
+    asked("impact")
   ) {
     question = {
       id: "impact",
@@ -1433,99 +1656,26 @@ export async function runAgentTurn(
     };
   }
 
-  /* ---------------------------------------------------------------- *
-   * Thin-report gates.                                                *
-   *                                                                   *
-   * "The mic in Studio 2 doesn't work" satisfies every slot gate above *
-   * — studio known, impact guessable, fault obviously unresolved — and *
-   * still tells the owner nothing they can act on. These fill the gap  *
-   * the model left when it decided a one-liner was a complete report:  *
-   * what is actually failing, who it hit, and whether it is new.       *
-   * ---------------------------------------------------------------- */
-  const DETAIL_CATEGORIES = [
-    "Repair and Maintenance", "Tech Issues", "Operating Systems",
-    "Safety and Security", "Class Experience", "Trainer Feedback",
-  ];
-  // Thin means the owner has nothing to act on — not merely short. A brief
-  // report that already carries what was tried, when it happened and how often
-  // is complete, and asking it for more is the interrogation these gates exist
-  // to avoid.
-  // Only facts the reporter actually supplied count. `location` and
-  // `systemAffected` are regex-derivable from the one-liner itself ("the mic in
-  // studio 2" yields both), so counting them would let the thinnest possible
-  // report declare itself complete.
+  /* Step 6 — the thin-report fallback, and it is now a real question.
+     "The mic in Studio 2 doesn't work" satisfies every slot gate and still
+     tells the owner nothing they can act on. The old ladder asked a device
+     symptom ("is it dead, cutting out, distorted?") of any thin report in six
+     categories — including a theft — because the ladder never read the report.
+     The curated bank is category-shaped instead, and a report that already
+     carries the detail is left alone. */
   const detailCarried = [
     s.data.actionTaken, s.data.occurredAt, s.data.frequency,
     s.data.witnesses, s.data.classInfo, s.data.notes, s.data.affectedMembers,
   ].filter((v) => v !== undefined && v !== "").length;
-  const thinReport = narrative.trim().length < 180 && detailCarried < 2;
-  const budgetLeft = (s.agentAsked?.length ?? 0) < budget;
-  if (!question && thinReport && budgetLeft && DETAIL_CATEGORIES.includes(s.data.category ?? "")) {
-    const detailGates: { id: string; ask: string; why: string; placeholder?: string; options?: ChatOption[] }[] = [
-      {
-        id: "custom:symptom",
-        ask: "What exactly is it doing — is it dead, cutting out, distorted, or something else?",
-        why: "the owner sends a different person depending on the symptom",
-        placeholder: "e.g. cuts out every few minutes",
-        options: [
-          { label: "Completely dead / no power", value: "ans:Completely dead — no power" },
-          { label: "Works intermittently", value: "ans:Works, but cuts out intermittently" },
-          { label: "Works badly / poor quality", value: "ans:Works, but the quality is bad" },
-          { label: "Physically damaged", value: "ans:Physically damaged" },
-        ],
-      },
-      {
-        id: "custom:first_noticed",
-        ask: "When was this first noticed?",
-        why: "it separates a new fault from one that has been running for weeks",
-        placeholder: "e.g. this morning, or about a week ago",
-        options: [
-          { label: "Today", value: "ans:First noticed today" },
-          { label: "In the last few days", value: "ans:First noticed in the last few days" },
-          { label: "A week or more ago", value: "ans:First noticed a week or more ago" },
-          { label: "Not sure", value: "ans:Not sure when it started" },
-        ],
-      },
-      {
-        id: "custom:recurring",
-        ask: "Has this happened before, or is this the first time?",
-        why: "a repeat fault gets replaced rather than patched again",
-        options: [
-          { label: "First time", value: "ans:First time it has happened" },
-          { label: "Happened before", value: "ans:It has happened before" },
-          { label: "Happens regularly", value: "ans:It happens regularly" },
-        ],
-      },
-      {
-        id: "custom:affected",
-        ask: "Were any classes or members affected — and if so, which?",
-        why: "those are the people the owner may need to credit or call",
-        placeholder: "e.g. the 7am Barre, about 12 members",
-        options: [
-          { label: "No classes affected", value: "ans:No classes or members were affected" },
-          { label: "Classes ran, but worse", value: "ans:Classes still ran, but were affected" },
-          { label: "Classes were cancelled", value: "ans:Classes had to be cancelled" },
-        ],
-      },
-    ];
-    const gate = detailGates.find((g) => !(s.agentAsked ?? []).includes(g.id));
-    if (gate) {
-      question = {
-        id: gate.id,
-        ask: gate.ask,
-        why: gate.why,
-        allowFreeText: true,
-        placeholder: gate.placeholder,
-        options: gate.options?.map((o) => ({ label: o.label, value: o.value })),
-      };
-    }
+  const thinReport = narrative.trim().length < 220 && detailCarried < 2;
+  if (!question && thinReport && questionBudgetLeft && operationalFault) {
+    const fallback = thinReportQuestion(s);
+    if (fallback) question = fallback;
   }
 
   // Never ask the same thing twice. If the answer did not land the first time,
   // asking again just loops the reporter — take what we have and draft.
-  if (question && (s.agentAsked ?? []).includes(question.id)) {
-    question = null;
-  }
+  if (question && askedBefore.has(question.id)) question = null;
 
   // Reporters can explicitly stop clarification. We retain unknown fields as
   // unknown and build the best reviewable draft from the evidence provided.
@@ -1563,6 +1713,13 @@ export async function runAgentTurn(
       ...extras.map((f) => ({ id: f.id, ask: f.ask })),
     ];
     const messages = [questionMessage(question, s, ctx, budget, turn.reply, extras)];
+    if (summaryPromise) {
+      const sum = await summaryPromise;
+      if (sum) {
+        s.contextSummary = sum;
+        s.summaryCovered = convo.length;
+      }
+    }
     return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
   }
 
@@ -1633,9 +1790,13 @@ export async function runAgentTurn(
   // edits and returns, later model calls keep the whole narrative in a few
   // sentences instead of losing it to the transcript window.
   if (convo.length > 6 || turn.summaryCompression) {
-    const summary = await generateSummary(turn.summaryCompression ?? s.contextSummary, convo).catch(
-      () => s.contextSummary,
-    );
+    // A summary is worth keeping on the session — the reporter may edit and
+    // come back. The model's own compression wins when it wrote one, otherwise
+    // the pass already running (or a fresh one) covers it.
+    const summary = turn.summaryCompression
+      ? turn.summaryCompression
+      : ((await (summaryPromise ?? generateSummary(s.contextSummary, convo).catch(() => undefined))) ??
+        s.contextSummary);
     if (summary) {
       s.contextSummary = summary;
       s.summaryCovered = convo.length;
@@ -1658,7 +1819,7 @@ export async function runAgentTurn(
       }),
     );
   }
-  messages.push(reviewMessage(s, ctx, insight));
+  messages.push(reviewMessage(s, ctx, insight, turn.handoverNote));
   return { state: s, messages, usedAgent: true, userUtterance: utterance, model: result.model };
 }
 
