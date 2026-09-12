@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { matchSession, parseSessionRows, reportedTimes, resolveStudio } from "./agent-session";
-import { emptyState, markSlotSource, slotSource, valueToWords } from "./chat-engine";
+import { emptyState, markSlotSource, slotSource } from "./chat-engine";
 import { applyOptionAnswer, hasClassSignal } from "./agent-session";
 
 const STUDIOS = [
@@ -110,51 +110,6 @@ describe("matchSession", () => {
     expect(matchSession(rows, "the 7:15pm powerCycle was late", "2026-08-28")).toBeNull();
     // The right day keeps the time-based match.
     expect(matchSession(rows, "the 7:15pm powerCycle was late", "2026-09-04")?.id).toBe(141066997);
-  });
-});
-
-describe("option vocabulary — every click speaks words the agent can read", () => {
-  const ctx = { studios: STUDIOS };
-
-  // Every option value the UI can render, from every engine surface.
-  const ANSWER_VALUES = [
-    "ans:Yes — needs immediate action",
-    "ans:impact|Several members affected",
-    "ans:resolved|Yes — resolved",
-    "studio:1", "studio:none",
-    "member:123|Priya Shah",
-    "session:141066997|Barre 57 · Fri, 4 Sept, 10:00 am|Neha Rao",
-    "trainer:Neha", "membership:20-class pack", "mem:Annual membership",
-    "for:On behalf of a member",
-    "class:Barre 57", "loc:Locker room", "sys:POS / card machine",
-    "when:Just now", "impact:safety", "risk:yes", "risk:no",
-    "freq:First time", "cat:Class Experience", "sub:Audio Issues",
-    "skip", "browse", "unknown", "showall",
-    "confirm:yes", "confirm:alt:0", "prio:High", "edit", "edit:studio",
-  ];
-
-  it("translates every answer value into non-empty words", () => {
-    for (const value of ANSWER_VALUES) {
-      const words = valueToWords(value, ctx);
-      expect(words, `value ${value} produced no words`).not.toBe("");
-    }
-  });
-
-  it("produces plain-language words, never raw ids", () => {
-    for (const value of ANSWER_VALUES) {
-      expect(valueToWords(value, ctx)).not.toMatch(/^[a-z]+:/);
-    }
-  });
-
-  it("maps the tapped studio to the real studio name", () => {
-    expect(valueToWords("studio:1", ctx)).toContain("Kwality House");
-    expect(valueToWords("studio:none", ctx)).toContain("not studio specific");
-  });
-
-  it("leaves deterministic commands wordless — they never reach the agent", () => {
-    for (const value of ["approve", "restart", "new", "undo", ""]) {
-      expect(valueToWords(value, ctx)).toBe("");
-    }
   });
 });
 

@@ -4,6 +4,7 @@ import { runAgent, type AgentTurn } from "./agent";
 import { emptyState, markSlotSource } from "./chat-engine";
 import { questionBudget } from "./guardrails";
 import { momenceAvailable, runTools } from "./agent-tools";
+import type { ChatMessage } from "./types";
 
 vi.mock("./agent", async (original) => ({ ...await original<typeof import("./agent")>(), runAgent: vi.fn() }));
 vi.mock("./recurrence", () => ({ findRelatedTickets: vi.fn(async () => []) }));
@@ -151,6 +152,52 @@ it("auto-matches outage context from the first message", async () => {
   expect(out.state.pendingQuestionId).toBe("resolvedNow");
 });
 
+it("takes a correction on a ticket that is already raised", async () => {
+  vi.mocked(momenceAvailable).mockResolvedValue(false);
+  const raised: ChatMessage = {
+    id: "m1", role: "assistant", content: "Done — **TKT-1** is live.", createdAt: new Date().toISOString(),
+    kind: "created",
+    created: {
+      id: 42, ticketNumber: "TKT-1", title: "Mic not working in Studio 2", studioName: "Kwality House, Kemps Corner",
+      assigneeName: "Neha", assigneeTeam: "Tech", assigneeEmail: "neha@example.in", assignmentReason: "AV owner",
+      slaDueAt: null, priority: "High",
+    },
+  };
+  const s = state();
+  s.step = "created";
+  s.createdTicketId = 42;
+  vi.mocked(runAgent).mockResolvedValue({
+    ok: true,
+    latencyMs: 0,
+    turn: {
+      reportEstablished: true, postCreated: true,
+      reply: "Sorted — Bandra, not Kemps Corner. I've put that on TKT-1.",
+      classification: { category: "Tech Issues", subcategory: "Mic Not Working", confidence: 0.9, alternates: [] },
+      slots: {}, secondaryIssues: [], nextQuestion: null, readyForDraft: false,
+      amendment: { update: "Correction: the studio was Bandra, not Kemps Corner.", kind: "correction" },
+    },
+  });
+  const out = await runAgentTurn(s, [raised], { text: "actually it was Bandra, not Kemps Corner" }, ctx);
+  // The old controller answered every message here with "This ticket is already
+  // raised. Start a new one below." — a correction had nowhere to go.
+  expect(out.usedAgent).toBe(true);
+  expect(out.state.step).toBe("created");
+  expect(out.messages[0].content).toContain("Bandra");
+  expect(out.intent).toMatchObject({ kind: "amend", ticketId: 42 });
+  // And the model was told which live ticket the conversation is about.
+  expect(vi.mocked(runAgent).mock.calls[0][1].ticket?.ticketNumber).toBe("TKT-1");
+});
+
+it("still starts a new ticket from the button on a raised ticket", async () => {
+  const s = state();
+  s.step = "created";
+  s.createdTicketId = 42;
+  const out = await runAgentTurn(s, [], { value: "new" }, ctx);
+  expect(out.usedAgent).toBe(false);
+  expect(out.state.step).toBe("describe");
+  expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+});
+
 it("auto-matches a later resolution reply before showing the draft", async () => {
   model(); const s = state(); delete s.data.resolvedNow; s.pendingQuestionId = "resolvedNow"; s.agentAsked = ["resolvedNow"];
   const out = await runAgentTurn(s, [], { text: "Yes, electricity was restored at 11:45 am." }, ctx);
@@ -159,26 +206,27 @@ it("auto-matches a later resolution reply before showing the draft", async () =>
   expect(out.state.step).toBe("review");
 });
 
-it("supplies first-pass extracted facts to later model passes in the same turn", async () => {
+it("gives the model one pass that already carries what was extracted from the message", async () => {
   vi.mocked(momenceAvailable).mockResolvedValue(true);
   vi.mocked(runTools).mockResolvedValue([{ tool: "search_member", args: { query: "Asha" }, result: "id=7 Asha Shah" }]);
-  const first: AgentTurn = {
+  const turn: AgentTurn = {
     reportEstablished: true, reply: "I’m checking Asha’s record, Jimmeey.",
     classification: { category: "Member Feedback", subcategory: "General Member Feedback", confidence: 0.8, alternates: [] },
-    slots: { member: { value: "Asha" }, raisedFor: { value: "On behalf of a member" }, impact: { value: "single" } },
-    secondaryIssues: [], nextQuestion: null, readyForDraft: false,
-    toolCalls: [{ tool: "search_member", args: { query: "Asha" } }],
+    slots: { momenceMemberId: { value: "7" } },
+    secondaryIssues: [], nextQuestion: { id: "custom:request", ask: "What did Asha request?" }, readyForDraft: false,
   };
-  const final = { ...first, slots: { ...first.slots, momenceMemberId: { value: "7" } }, toolCalls: [], nextQuestion: { id: "custom:request", ask: "What did Asha request?" } };
-  vi.mocked(runAgent)
-    .mockResolvedValueOnce({ ok: true, latencyMs: 0, turn: first })
-    .mockImplementationOnce(async (_transcript, agentContext) => {
-      expect(agentContext.known.member).toBe("Asha");
-      expect(agentContext.known.raisedFor).toBe("On behalf of a member");
-      expect(agentContext.known.impact).toContain("One member");
-      return { ok: true, latencyMs: 0, turn: final };
-    });
+  vi.mocked(runAgent).mockImplementation(async (_transcript, agentContext) => {
+    // The member lookup used to run after the model had already answered and
+    // bought a second reasoning pass. It is a pre-fetch now: the single pass
+    // sees the facts the message itself yielded, and the model's own question
+    // survives to the reporter instead of being replaced by a canned one.
+    expect(agentContext.known.member).toBe("Asha");
+    expect(agentContext.known.studio).toContain("Kemps Corner");
+    return { ok: true, latencyMs: 0, turn };
+  });
   const out = await runAgentTurn(emptyState(), [], { text: "A member named Asha raised a concern at Kemps Corner." }, ctx);
+  expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
   expect(out.state.data.memberName).toBe("Asha");
+  expect(out.state.data.momenceMemberId).toBe(7);
   expect(out.state.pendingQuestionId).toBe("custom:request");
 });

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNow } from "@/lib/use-now";
 import type { ClassFeedback, Ticket, Trainer, TrainerEvaluation } from "@/db/schema";
 import { bandTone } from "@/lib/trainer-eval";
 import { download, toPng } from "@/lib/chat-export";
@@ -251,6 +252,9 @@ export default function TrainerProfile({
   tickets: Ticket[];
   classes: ClassFeedback[];
 }) {
+  // Reporting windows and recency read a ticking clock rather than the moment
+  // React last happened to render.
+  const now = useNow();
   const reportRef = useRef<HTMLDivElement>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [loadingAi, setLoadingAi] = useState(true);
@@ -273,8 +277,8 @@ export default function TrainerProfile({
   const cutoff = useMemo(() => {
     const p = PERIODS.find((x) => x.id === appliedPeriod);
     if (!p || p.days == null) return null;
-    return Date.now() - p.days * 86400000;
-  }, [appliedPeriod]);
+    return now - p.days * 86400000;
+  }, [appliedPeriod, now]);
 
   /** Everything downstream reads from these — filtered by the applied reporting period. */
   const evaluations = useMemo(
@@ -412,7 +416,6 @@ export default function TrainerProfile({
   const positives = tickets.filter((t) => t.sentiment === "Positive").length;
   const negatives = tickets.filter((t) => t.sentiment === "Negative" || t.sentiment === "Escalated").length;
   const openIssues = tickets.filter((t) => !["Resolved", "Closed"].includes(t.status));
-  const now = Date.now();
   const last30 = tickets.filter((t) => now - new Date(t.createdAt).getTime() < 30 * 86400000);
   const daysSinceReview = latest ? Math.floor((now - new Date(latest.submittedAt).getTime()) / 86400000) : null;
 

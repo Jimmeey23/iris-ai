@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useNow } from "@/lib/use-now";
 import type { Staff, Studio, Ticket } from "@/db/schema";
 import { CATEGORIES, CATEGORY_META, PRIORITIES, STATUSES } from "@/lib/taxonomy";
 import { DEPARTMENTS } from "@/lib/org";
@@ -60,6 +61,9 @@ export default function TicketsExplorer({
   const [sort, setSort] = useState("newest");
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
   const [page, setPage] = useState(1);
+  // SLA breaches are compared against a ticking clock rather than the moment
+  // React last rendered.
+  const now = useNow();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const filtered = useMemo(() => {
@@ -96,14 +100,20 @@ export default function TicketsExplorer({
 
   const counts = useMemo(() => {
     const breached = filtered.filter(
-      (t) => OPEN.includes(t.status) && t.slaDueAt && new Date(t.slaDueAt).getTime() < Date.now(),
+      (t) => OPEN.includes(t.status) && t.slaDueAt && new Date(t.slaDueAt).getTime() < now,
     ).length;
     return { total: filtered.length, open: filtered.filter((t) => OPEN.includes(t.status)).length, breached };
-  }, [filtered]);
+  }, [filtered, now]);
 
-  useEffect(() => {
+  // Changing a filter returns to page one. Doing it here, during render, is the
+  // same result as the effect was after — without the extra render pass and the
+  // frame of the old page showing under the new filter.
+  const filtersKey = [q, status, category, priority, studio, assignee, department, sort, groupBy].join("\u0000");
+  const [pageKey, setPageKey] = useState(filtersKey);
+  if (pageKey !== filtersKey) {
+    setPageKey(filtersKey);
     setPage(1);
-  }, [q, status, category, priority, studio, assignee, department, sort, groupBy]);
+  }
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount);

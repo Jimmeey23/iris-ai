@@ -52,6 +52,10 @@ export default async function DashboardPage() {
   await ensureSeeded();
   const [stats, tickets] = await Promise.all([getDashboardStats(), listTickets({ limit: 300 })]);
 
+  // Server component: this runs once per request on the server, so "now" is a
+  // request-time fact rather than a value that can drift between client
+  // renders. The client purity rule does not model that distinction.
+  // eslint-disable-next-line react-hooks/purity
   const now = Date.now();
   const attention = tickets
     .filter(

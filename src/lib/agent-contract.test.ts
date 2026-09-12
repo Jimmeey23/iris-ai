@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCoherentAgentTurn, type AgentTurn } from "./agent";
+import { POST_CREATION_TOOLS, TERMINAL_TOOLS, isCoherentAgentTurn, type AgentTurn } from "./agent";
 
 function turn(patch: Partial<AgentTurn>): AgentTurn {
   return {
@@ -38,5 +38,34 @@ describe("agent turn contract", () => {
 
   it("rejects contradictory draft and question output", () => {
     expect(isCoherentAgentTurn(turn({ readyForDraft: true, nextQuestion: { id: "studio", ask: "Which studio?" } }))).toBe(false);
+  });
+});
+
+/**
+ * The prompt and the tool schemas are one contract in two files. A field the
+ * instructions ask for but `additionalProperties: false` rejects fails the
+ * model call outright, so the two are asserted together.
+ */
+describe("terminal tool schemas match what the prompt asks for", () => {
+  const params = (tools: typeof TERMINAL_TOOLS, name: string) =>
+    (tools.find((t) => t.name === name)?.parameters ?? {}) as {
+      properties?: Record<string, { type?: string }>;
+      required?: string[];
+    };
+
+  it("file_ticket accepts the conversational reply and the hand-over line", () => {
+    const p = params(TERMINAL_TOOLS, "file_ticket");
+    expect(p.properties?.reply?.type).toBe("string");
+    expect(p.properties?.handoverNote?.type).toBe("string");
+    expect(p.required).toContain("reply");
+  });
+
+  it("post-creation tools accept the fields their instructions name", () => {
+    const amend = params(POST_CREATION_TOOLS, "amend_ticket");
+    expect(amend.properties?.update?.type).toBe("string");
+    const follow = params(POST_CREATION_TOOLS, "raise_followup");
+    for (const field of ["title", "summary", "category", "subcategory"]) {
+      expect(follow.properties?.[field]?.type, field).toBe("string");
+    }
   });
 });

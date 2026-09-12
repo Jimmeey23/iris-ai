@@ -7,6 +7,12 @@ import { buildQuestion, issueIntro, planSlots, type SlotId } from "./dynamic-cha
 import { WHY, ack, closingLine, coachTip, progressNote, reactTo, timeGreeting } from "./conversation";
 import type { ChatMessage, ChatOption, ComposerContext, MomenceContext, TicketDraft } from "./types";
 import {
+  applySlotAnswer,
+  optionValueToWords,
+  parseOptionValue,
+  type SlotAnswerData,
+} from "./slot-answers";
+import {
   CLASS_FORMATS,
   IMPACT_LABEL,
   IMPACT_OPTIONS,
@@ -16,6 +22,7 @@ import {
   applyComposerContext,
   inferFromText,
 } from "./chat-inference";
+import { OCCURRED_OPTIONS } from "./catalog";
 
 export type EngineStudio = {
   id: number;
@@ -130,6 +137,20 @@ export type IntakeState = {
   insight?: AiInsight;
   /** Per-slot provenance — see SlotSource. */
   slotSources?: Record<string, SlotSource>;
+  /**
+   * The reporter's own words behind each slot value, kept so the model can
+   * reason from evidence rather than from a bare value ("Yesterday" says
+   * nothing about whether a fault is still live; the sentence usually does).
+   */
+  slotQuotes?: Record<string, string>;
+  /**
+   * What the field held before the reporter asked to change it. The old code
+   * cleared the field the moment the edit question was asked, so the previous
+   * answer was destroyed even if the reporter changed their mind — and, because
+   * the agent path could not read the legacy option value, the field was simply
+   * lost. The old value is kept here and restored on "back to draft".
+   */
+  preEdit?: { field: string; data: Partial<IntakeData> };
   /** Compressed facts from the earlier part of a long conversation. */
   contextSummary?: string;
   /** How many transcript messages the summary already covers. */
@@ -202,44 +223,21 @@ export function emptyState(): IntakeState {
  */
 export function valueToWords(value: string, ctx: { studios: EngineContext["studios"] }): string {
   if (!value) return "";
-  if (value.startsWith("ans:")) return value.slice(4);
-  if (value.startsWith("studio:")) {
-    if (value === "studio:none") return "This is not studio specific.";
-    const st = ctx.studios.find((x) => x.id === Number(value.slice(7)));
-    return st ? `The studio is ${st.name}, ${st.city}.` : "Picked the studio from the list.";
-  }
-  if (value.startsWith("session:")) {
-    const [, id, ...rest] = value.split(":");
-    const [name, at, teacher] = rest.join(":").split("|");
-    return `The class was ${[name, at, teacher && `taught by ${teacher}`].filter(Boolean).join(", ")}.`;
-  }
-  if (value.startsWith("member:")) {
-    const [, id, ...rest] = value.split(":");
-    return `The member is ${rest.length ? rest.join(":") : value.slice(7)}.`;
-  }
-  if (value.startsWith("for:")) return `Raised for: ${value.slice(4)}.`;
-  if (value.startsWith("class:")) return `The class was ${value.slice(6)}.`;
-  if (value.startsWith("loc:")) return `It happened in the ${value.slice(4)}.`;
-  if (value.startsWith("sys:")) return `The system affected is ${value.slice(4)}.`;
-  if (value.startsWith("when:")) return `It happened ${value.slice(5).toLowerCase()}.`;
-  if (value.startsWith("impact:")) return `Impact: ${value.slice(7)}.`;
-  if (value === "risk:yes") return "Someone is at risk right now.";
-  if (value === "risk:no") return "No immediate risk.";
-  if (value.startsWith("freq:")) return `Frequency: ${value.slice(5)}.`;
-  if (value.startsWith("membership:")) return `Membership: ${value.slice(11)}.`;
-  if (value.startsWith("mem:")) return `Membership: ${value.slice(4)}.`;
-  if (value.startsWith("trainer:")) return `The trainer was ${value.slice(8)}.`;
   if (value.startsWith("cat:")) return `File this under ${value.slice(4)}.`;
   if (value.startsWith("sub:")) return `The subcategory is ${value.slice(4)}.`;
-  if (value === "skip") return "Skip that one.";
-  if (value === "browse") return "Let me pick the category myself.";
-  if (value === "unknown") return "The trainer's name is not known.";
-  if (value === "showall") return "Show me all the options.";
   if (value === "confirm:yes") return "That classification is right.";
   if (value.startsWith("confirm:alt:")) return "Use a different classification.";
-  if (value.startsWith("prio:")) return `Priority: ${value.slice(5)}.`;
   if (value === "edit" || value.startsWith("edit:")) return "I'd like to change something.";
-  return "";
+  if (value.startsWith("sessions:")) return "Those are the classes affected.";
+  if (value.startsWith("members:")) return "Those are the members affected.";
+  const studioName =
+    value.startsWith("studio:") && value !== "studio:none"
+      ? ctx.studios.find((x) => x.id === Number(value.split(":")[1]))
+      : undefined;
+  return optionValueToWords(
+    value,
+    studioName ? `${studioName.name}, ${studioName.city}` : undefined,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -463,10 +461,10 @@ function question(step: string, s: IntakeState, ctx: EngineContext): Question {
       return {
         prompt: "Who is this being raised for?",
         options: [
-          { label: "A member reported it", value: "for:On behalf of a member" },
-          { label: "I noticed it myself", value: "for:Noticed by staff" },
-          { label: "Multiple members raised it", value: "for:Multiple members" },
-          { label: "Staff / trainer concern", value: "for:Staff or trainer concern" },
+          { label: "A member reported it", value: "ans:raisedFor|On behalf of a member" },
+          { label: "I noticed it myself", value: "ans:raisedFor|Noticed by staff" },
+          { label: "Multiple members raised it", value: "ans:raisedFor|Multiple members" },
+          { label: "Staff / trainer concern", value: "ans:raisedFor|Staff or trainer concern" },
         ],
       };
     case "member":
@@ -496,28 +494,28 @@ function question(step: string, s: IntakeState, ctx: EngineContext): Question {
     case "class":
       return {
         prompt: "Which class or format was it?",
-        options: CLASS_FORMATS.map((c) => ({ label: c, value: `class:${c}` })),
+        options: CLASS_FORMATS.map((c) => ({ label: c, value: `ans:classInfo|${c}` })),
         allowFreeText: true,
         placeholder: "e.g. 7:00 AM Barre 57",
       };
     case "location":
       return {
         prompt: "Where in the studio is this?",
-        options: LOCATIONS.map((l) => ({ label: l, value: `loc:${l}` })),
+        options: LOCATIONS.map((l) => ({ label: l, value: `ans:location|${l}` })),
         allowFreeText: true,
         placeholder: "Describe the spot",
       };
     case "system":
       return {
         prompt: "Which system or device is affected?",
-        options: SYSTEMS.map((sys) => ({ label: sys, value: `sys:${sys}` })),
+        options: SYSTEMS.map((sys) => ({ label: sys, value: `ans:systemAffected|${sys}` })),
         allowFreeText: true,
         placeholder: "Name the system",
       };
     case "membership":
       return {
         prompt: "Which membership or package does this relate to?",
-        options: MEMBERSHIPS.map((m) => ({ label: m, value: `mem:${m}` })),
+        options: MEMBERSHIPS.map((m) => ({ label: m, value: `ans:membershipRef|${m}` })),
         allowFreeText: true,
         placeholder: "e.g. 20-class pack bought in March",
       };
@@ -525,25 +523,19 @@ function question(step: string, s: IntakeState, ctx: EngineContext): Question {
       return {
         prompt: "Is anyone at risk, or is this still happening right now?",
         options: [
-          { label: "Yes — needs immediate action", value: "risk:yes", tone: "danger" },
-          { label: "No immediate risk", value: "risk:no" },
+          { label: "Yes — needs immediate action", value: "ans:atRisk|Yes", tone: "danger" },
+          { label: "No immediate risk", value: "ans:atRisk|No" },
         ],
       };
     case "when":
       return {
         prompt: "When did this happen?",
-        options: [
-          { label: "Just now", value: "when:Just now" },
-          { label: "Earlier today", value: "when:Earlier today" },
-          { label: "Yesterday", value: "when:Yesterday" },
-          { label: "Earlier this week", value: "when:Earlier this week" },
-          { label: "Ongoing / recurring", value: "when:Ongoing / recurring" },
-        ],
+        options: OCCURRED_OPTIONS.map((o) => ({ label: o, value: `ans:occurredAt|${o}` })),
       };
     case "impact":
       return {
         prompt: "How wide is the impact? This sets priority and SLA.",
-        options: IMPACT_OPTIONS.map((o) => ({ label: o.label, value: o.value })),
+        options: IMPACT_OPTIONS.map((o) => ({ label: o.label, value: `ans:impact|${o.label}` })),
       };
     case "notes":
       return {
@@ -686,11 +678,23 @@ export function buildDraft(s: IntakeState, ctx: EngineContext, insight?: AiInsig
   };
 }
 
-export function reviewMessage(s: IntakeState, ctx: EngineContext, insight?: AiInsight): ChatMessage {
+export function reviewMessage(
+  s: IntakeState,
+  ctx: EngineContext,
+  insight?: AiInsight,
+  handoverNote?: string,
+): ChatMessage {
   const draft = buildDraft(s, ctx, insight);
   const first = ctx.reporter.name.split(" ")[0] || "there";
+  // The model's own hand-over line when it wrote one — it has read the report
+  // and the draft, so it can say what it concluded and what it is unsure about.
+  // The fixed sentence stays as the fallback for the deterministic and
+  // degraded paths, which have no model to write it.
+  const prose =
+    handoverNote?.trim() ||
+    `Here's your draft, ${first} — my full read on it. Give it a look, and approve when you're happy and I'll route it straight to the right owner.`;
   return assistant(
-    `Here's your draft, ${first} — my full read on it. Give it a look, and approve when you're happy and I'll route it straight to the right owner.`,
+    prose,
     {
       kind: "draft",
       draft,
@@ -773,6 +777,14 @@ export function startSession(ctx: EngineContext): EngineResult {
 /* Answer handling                                                     */
 /* ------------------------------------------------------------------ */
 
+/** A stable, human label for a slot id, used when a value has no fixed field. */
+function slotLabel(slot: string): string {
+  return slot
+    .replace(/^custom:/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/^\w/, (c) => c.toUpperCase());
+}
+
 function applyAnswer(
   step: string,
   input: EngineInput,
@@ -802,6 +814,50 @@ function applyAnswer(
       fn();
       return { ok: true };
     }
+  }
+
+  // A click that names its own slot is understood here too. The questionnaire
+  // renders `ans:<slot>|<label>` so that one vocabulary works on both engines —
+  // the deterministic one must not fall through to "I didn't catch that".
+  if (value.startsWith("ans:")) {
+    const parsed = parseOptionValue(value, s.pendingQuestionId ?? null);
+    if (!parsed.slot) return { ok: true };
+    const slot = parsed.slot;
+    if (slot === "category") {
+      const canonical = CATEGORIES.find((c) => c.toLowerCase() === parsed.label.trim().toLowerCase());
+      if (!canonical) return { ok: false, retry: "Please pick one of the categories below." };
+      d.category = canonical;
+      d.subcategory = undefined;
+      return { ok: true };
+    }
+    if (slot === "subcategory") {
+      d.subcategory = parsed.label.trim();
+      return { ok: true };
+    }
+    if (slot === "studio") {
+      if (/not studio/i.test(parsed.label)) {
+        d.studioId = null;
+        d.studioName = "Not studio specific";
+        return { ok: true };
+      }
+      const found = extractStudio(parsed.label, ctx.studios);
+      if (found) {
+        const studio = ctx.studios.find((st) => st.id === found.id)!;
+        d.studioId = studio.id;
+        d.studioName = `${studio.name}, ${studio.city}`;
+        return { ok: true };
+      }
+      return { ok: false, retry: "Tap the studio this relates to." };
+    }
+    if (!applySlotAnswer(slot, parsed.label, d as SlotAnswerData)) {
+      // The words were recognised but the value is not a usable slot value —
+      // record them as note text rather than silently dropping the turn.
+      const t = parsed.label.trim();
+      if (!t) return { ok: true };
+      d.extraDetails = { ...(d.extraDetails ?? {}), [slotLabel(slot)]: t };
+      return { ok: true };
+    }
+    return { ok: true };
   }
 
   switch (step) {
@@ -1024,7 +1080,11 @@ function applyAnswer(
       return { ok: true };
     }
     case "impact": {
-      const found = IMPACT_OPTIONS.find((o) => o.value === value);
+      // `ans:impact|<key>` is what the renderers emit; `impact:<key>` is the
+      // vocabulary an older session (or a cached transcript) can still carry.
+      const found =
+        IMPACT_OPTIONS.find((o) => o.value === value) ??
+        IMPACT_OPTIONS.find((o) => value === `impact:${o.key}`);
       if (found) {
         d.impact = found.key;
         return { ok: true };
@@ -1079,6 +1139,7 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
   const s: IntakeState = { ...state, data: { ...state.data }, suggestions: [...state.suggestions] };
   const value = input.value ?? "";
   const text = (input.text ?? "").trim();
+  const preEditRestore = s.preEdit?.data;
 
   if (value === "restart") {
     const fresh = startSession(ctx);
@@ -1267,43 +1328,51 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
   if (s.step === "edit_menu") {
     if (value === "edit:cancel") {
       s.step = "review";
+      if (preEditRestore) s.data = { ...s.data, ...preEditRestore };
+      s.preEdit = undefined;
+      s.editingField = null;
       return { state: s, messages: [reviewMessage(s, ctx)] };
     }
-    if (value.startsWith("edit:")) {
+    if (value === "edit:undo") {
+      if (preEditRestore) s.data = { ...s.data, ...preEditRestore };
+      s.preEdit = undefined;
+      s.editingField = null;
+      s.insight = undefined;
+      s.step = "review";
+      return { state: s, messages: [assistant("Put it back."), reviewMessage(s, ctx)] };
+    }
+    if (value.startsWith("edit:") && value !== "edit:cancel") {
       const field = value.slice(5);
       const d = s.data;
-      const clear: Record<string, () => void> = {
-        category: () => {
-          d.category = undefined;
-          d.subcategory = undefined;
-          s.showAllSubs = false;
-        },
-        studio: () => {
-          d.studioId = undefined;
-          d.studioName = undefined;
-        },
-        detail: () => { d.rawText = undefined; },
-        raised_for: () => { d.raisedFor = undefined; },
-        member: () => {
-          d.memberName = undefined;
-          d.memberContact = undefined;
-          d.momenceMemberId = undefined;
-        },
-        trainer: () => { d.trainerName = undefined; },
-        class: () => { d.classInfo = undefined; },
-        location: () => { d.location = undefined; },
-        system: () => { d.systemAffected = undefined; },
-        membership: () => { d.membershipRef = undefined; },
-        when: () => { d.occurredAt = undefined; },
-        impact: () => { d.impact = undefined; },
-        notes: () => { d.notes = undefined; },
-        frequency: () => { d.frequency = undefined; },
-        action_taken: () => { d.actionTaken = undefined; },
-        witnesses: () => { d.witnesses = undefined; },
-        amount: () => { d.amount = undefined; },
-        priority: () => { d.priorityOverride = undefined; },
+      // Snapshot the field's current value instead of deleting it. Asking to
+      // change something is not a statement that the old answer never existed.
+      const EDIT_SLOT: Record<string, keyof IntakeData> = {
+        category: "category", studio: "studioName", detail: "rawText",
+        raised_for: "raisedFor", member: "memberName", trainer: "trainerName",
+        class: "classInfo", location: "location", system: "systemAffected",
+        membership: "membershipRef", when: "occurredAt", impact: "impact",
+        notes: "notes", frequency: "frequency", action_taken: "actionTaken",
+        witnesses: "witnesses", amount: "amount",
       };
-      clear[field]?.();
+      const slotKey = EDIT_SLOT[field];
+      s.preEdit = slotKey
+        ? { field, data: { [slotKey]: d[slotKey] } as Partial<IntakeData> }
+        : { field, data: {} };
+      // Drop the human lock so the reporter's next answer can replace it; the
+      // value itself stays visible and is what "back to draft" restores.
+      if (slotKey && s.slotSources) {
+        const next = { ...s.slotSources };
+        delete next[slotKey === "studioName" ? "studio" : (slotKey as string)];
+        delete next[slotKey as string];
+        s.slotSources = next;
+      }
+      if (field === "category") {
+        s.showAllSubs = false;
+        s.editingField = "category";
+        s.step = "subcategory";
+        return { state: s, messages: ask("subcategory", s, ctx) };
+      }
+
       // The cached read no longer describes this ticket — score it again once
       // the new answer is in. (Merely viewing the draft must not do this.)
       s.insight = undefined;
@@ -1357,9 +1426,20 @@ export function handleInput(state: IntakeState, input: EngineInput, ctx: EngineC
       s.step = "subcategory";
       return { state: s, messages: ask("subcategory", s, ctx) };
     }
+    const what = s.editingField.replace(/[_-]+/g, " ");
+    // The reporter confirmed a change: commit it and clear the undo snapshot.
     s.editingField = null;
+    s.preEdit = undefined;
     s.step = "review";
-    return { state: s, messages: [assistant("Updated."), reviewMessage(s, ctx)] };
+    return {
+      state: s,
+      messages: [
+        assistant(`Updated the ${what} — here's the draft again.`, {
+          options: [{ label: "Undo that change", value: "edit:undo", tone: "ghost" }],
+        }),
+        reviewMessage(s, ctx),
+      ],
+    };
   }
 
   const answeredSlot = STEP_TO_SLOT[previousStep];
@@ -1403,6 +1483,8 @@ export function createdMessage(
   ticket: {
     id: number;
     ticketNumber: string;
+    title: string;
+    studioName?: string;
     assigneeName: string | null;
     assigneeTeam: string | null;
     assigneeEmail: string | null;
@@ -1428,6 +1510,8 @@ export function createdMessage(
     created: {
       id: ticket.id,
       ticketNumber: ticket.ticketNumber,
+      title: ticket.title,
+      studioName: ticket.studioName,
       assigneeName: ticket.assigneeName,
       assigneeTeam: ticket.assigneeTeam,
       assigneeEmail: ticket.assigneeEmail,

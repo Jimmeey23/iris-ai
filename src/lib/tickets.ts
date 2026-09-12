@@ -487,6 +487,71 @@ export async function updateTicket(
 /* Multi-issue reports                                                 */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A reporter's later message on a live ticket, written onto it.
+ *
+ * The caller has already checked that this chat session raised the ticket; the
+ * only fields an amendment may touch are the timeline and the priority, because
+ * those are the ones a person talking to Iris can legitimately change. Editing
+ * the account itself stays a reviewable, human action.
+ */
+export async function amendTicketFromChat(
+  ticketId: number,
+  update: string,
+  actor: string,
+  opts: { kind?: string; priority?: string } = {},
+): Promise<Ticket | null> {
+  const [current] = await db.select().from(tickets).where(eq(tickets.id, ticketId)).limit(1);
+  if (!current) return null;
+  const text = update.trim().slice(0, 2000);
+  if (!text) return current;
+
+  await addEvent(ticketId, opts.kind === "resolution" ? "resolution" : "comment", actor, text, {
+    source: "Iris",
+    kind: opts.kind ?? "addition",
+  });
+
+  const validPriority = ["Critical", "High", "Medium", "Low"];
+  if (opts.priority && validPriority.includes(opts.priority) && opts.priority !== current.priority) {
+    await updateTicket(ticketId, { priority: opts.priority }, actor);
+  } else {
+    await db.update(tickets).set({ updatedAt: new Date() }).where(eq(tickets.id, ticketId));
+  }
+  const [updated] = await db.select().from(tickets).where(eq(tickets.id, ticketId)).limit(1);
+  return updated ?? current;
+}
+
+/**
+ * A genuinely separate matter raised in the same conversation, as its own ticket
+ * linked to the one it came from — the way a colleague would log it.
+ */
+export async function raiseLinkedTicket(input: {
+  parentTicketId: number;
+  draft: TicketDraft;
+}): Promise<Ticket | null> {
+  const [parent] = await db.select().from(tickets).where(eq(tickets.id, input.parentTicketId)).limit(1);
+  if (!parent) return null;
+
+  const child = await createTicketFromDraft({
+    ...input.draft,
+    parentTicketId: parent.id,
+    secondaryIssues: undefined,
+  });
+
+  await db
+    .update(tickets)
+    .set({ linkedTicketIds: [...new Set([...(parent.linkedTicketIds ?? []), child.id])], updatedAt: new Date() })
+    .where(eq(tickets.id, parent.id));
+  await db
+    .update(tickets)
+    .set({ linkedTicketIds: [...new Set([...(child.linkedTicketIds ?? []), parent.id])], updatedAt: new Date() })
+    .where(eq(tickets.id, child.id));
+
+  await addEvent(parent.id, "system", "Iris", `Linked follow-up raised: ${child.ticketNumber} — ${child.title}`);
+  await addEvent(child.id, "system", "Iris", `Raised from ${parent.ticketNumber} in the same conversation.`);
+  return child;
+}
+
 export type RaisedBundle = {
   primary: Ticket;
   children: Ticket[];

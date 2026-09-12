@@ -9,6 +9,31 @@ import MomencePicker, { type PickResult } from "./MomencePicker";
 import type { ComposerContext } from "@/lib/types";
 import { apiFetch } from "@/lib/api-client";
 
+/**
+ * Defined at module scope, not inside the panel: a component created during
+ * render is a new type on every pass, so React remounts the whole list — which
+ * is exactly what made the context panel flicker on each keystroke.
+ */
+function Row({ title, sub, onClick, active }: { title: string; sub?: string; onClick: () => void; active?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition hover:bg-[var(--surface-3)]"
+      style={active ? { background: "var(--accent-soft)" } : undefined}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12.5px] font-medium txt">{title}</span>
+        {sub && <span className="block truncate text-[10.5px] txt-3">{sub}</span>}
+      </span>
+      {active && <span className="text-[11px] accent-txt">✓</span>}
+    </button>
+  );
+}
+
+function List({ children }: { children: React.ReactNode }) {
+  return <div className="hide-scrollbar mt-1.5 max-h-[248px] space-y-0.5 overflow-y-auto">{children}</div>;
+}
+
 const TAB_META: Record<ContextTabKey, { label: string; icon: string }> = {
   category: { label: "Category", icon: "◎" },
   studio: { label: "Studio", icon: "◈" },
@@ -115,20 +140,6 @@ export default function ContextBar({
 
   const activeCount = suggestions.order.filter((t) => value(t)).length;
 
-  const Row = ({ title, sub, onClick, active }: { title: string; sub?: string; onClick: () => void; active?: boolean }) => (
-    <button
-      onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition hover:bg-[var(--surface-3)]"
-      style={active ? { background: "var(--accent-soft)" } : undefined}
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12.5px] font-medium txt">{title}</span>
-        {sub && <span className="block truncate text-[10.5px] txt-3">{sub}</span>}
-      </span>
-      {active && <span className="text-[11px] accent-txt">✓</span>}
-    </button>
-  );
-
   const Search = (placeholder: string) => (
     <input
       autoFocus
@@ -139,11 +150,7 @@ export default function ContextBar({
     />
   );
 
-  const List = ({ children }: { children: React.ReactNode }) => (
-    <div className="hide-scrollbar mt-1.5 max-h-[248px] space-y-0.5 overflow-y-auto">{children}</div>
-  );
-
-  const simpleList = (
+  const simpleList = useCallback((
     key: ContextTabKey,
     items: string[],
     apply: (v: string) => void,
@@ -174,7 +181,10 @@ export default function ContextBar({
         </List>
       </>
     );
-  };
+    // `Search` renders from component state on purpose: the list itself must
+    // stay stable across keystrokes, so it is deliberately not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, suggestions.hints, setOpen, setQuery, value]);
 
   const panel = useMemo(() => {
     if (!open) return null;
@@ -370,7 +380,7 @@ export default function ContextBar({
       case "department": return simpleList("department", opts.department ?? [], (v) => set({ department: v }));
       case "source": return simpleList("source", opts.source ?? [], (v) => set({ source: v }));
     }
-  }, [open, suggestions, studios, context, set, onChange, memberships, loadMemberDetail, query]);
+  }, [open, suggestions, studios, context, set, onChange, memberships, loadMemberDetail, simpleList]);
 
   return (
     <div ref={wrapRef} className="relative">

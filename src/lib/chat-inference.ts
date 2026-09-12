@@ -111,10 +111,10 @@ export const MEMBERSHIPS = [
 ];
 
 export const IMPACT_OPTIONS = [
-  { label: "🚨 Safety risk or classes blocked", value: "impact:safety", key: "safety" },
-  { label: "👥 Several members affected", value: "impact:many", key: "many" },
-  { label: "👤 One member / minor disruption", value: "impact:single", key: "single" },
-  { label: "💡 Suggestion or improvement idea", value: "impact:suggestion", key: "suggestion" },
+  { label: "🚨 Safety risk or classes blocked", value: "ans:impact|safety", key: "safety" },
+  { label: "👥 Several members affected", value: "ans:impact|many", key: "many" },
+  { label: "👤 One member / minor disruption", value: "ans:impact|single", key: "single" },
+  { label: "💡 Suggestion or improvement idea", value: "ans:impact|suggestion", key: "suggestion" },
 ];
 
 export const IMPACT_LABEL: Record<string, string> = {

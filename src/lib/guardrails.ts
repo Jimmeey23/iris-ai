@@ -146,16 +146,72 @@ export async function questionBudget(): Promise<number> {
   return Math.max(1, Math.min(12, Math.round(raw)));
 }
 
-/** Slots that must be present before a ticket can be raised. */
-export function missingRequired(data: {
-  studioName?: string;
-  rawText?: string;
-  impact?: string;
-  resolvedNow?: boolean;
-}): string[] {
+/**
+ * Categories that are a live fault by definition. Only these can be asked the
+ * operational questions — "is it fixed yet?", "how many members did it hit?"
+ * Asking them of a compliment, a suggestion or a request for a new class is
+ * exactly how the assistant came across as a form.
+ */
+const FAULT_CATEGORIES = new Set([
+  "Repair and Maintenance",
+  "Tech Issues",
+  "Operating Systems",
+  "Safety and Security",
+  "Class Experience",
+  "Theft and Lost Items",
+  "Studio Amenities and Facilities",
+]);
+
+/** Categories where the report is feedback, not a fault. */
+const NON_FAULT_CATEGORIES = new Set([
+  "Trainer Feedback",
+  "Brand Feedback",
+  "Customer Service and Communication",
+  "Pricing and Memberships",
+  "Scheduling",
+  "Miscellaneous",
+]);
+
+export function isFaultCategory(category?: string): boolean {
+  if (!category) return false;
+  if (NON_FAULT_CATEGORIES.has(category)) return false;
+  if (FAULT_CATEGORIES.has(category)) return true;
+  return false;
+}
+
+/**
+ * Slots that must be present before a ticket can be raised — shaped by what the
+ * report actually is.
+ *
+ * Requiring `impact` and `resolvedNow` of everything is what put a severity
+ * question in front of a member's compliment about a class. A compliment has no
+ * blast radius; a suggestion has no current state. Both still need a studio and
+ * a subject, and a fault still needs to know whether it is live.
+ *
+ * `category` is optional so existing callers (and the old tests) keep the
+ * fault-shaped behaviour they were written against.
+ */
+export function missingRequired(
+  data: {
+    studioName?: string;
+    rawText?: string;
+    impact?: string;
+    resolvedNow?: boolean;
+    plannedWork?: boolean;
+    plannedWindow?: string;
+  },
+  category?: string,
+): string[] {
   const missing: string[] = [];
   if (!data.rawText || data.rawText.trim().length < 3) missing.push("rawText");
   if (data.studioName === undefined) missing.push("studio");
+  if (!isFaultCategory(category)) return missing;
+  // Scheduled work has no live state to establish — its owner-critical gap is
+  // the window, so it is handled below rather than in the generic order.
+  if (data.plannedWork) {
+    if (!data.plannedWindow) missing.push("plannedWindow");
+    return missing;
+  }
   if (data.impact === undefined) missing.push("impact");
   if (data.resolvedNow === undefined) missing.push("resolvedNow");
   return missing;

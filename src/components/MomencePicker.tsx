@@ -54,106 +54,21 @@ function fmt(iso: string) {
   });
 }
 
-export default function MomencePicker({
-  kind,
-  studios = [],
-  onPick,
-  onConfirm,
-  sessionIds = [],
-  compact = false,
-  autoFocus = true,
+/** Module scope: a component defined during render remounts every keystroke. */
+function Row({
+  primary,
+  secondary,
+  right,
+  checked,
+  onClick,
 }: {
-  kind: PickerKind;
-  studios?: Studio[];
-  onPick: (r: PickResult) => void;
-  /** Multi-select kinds report the whole selection at once. */
-  onConfirm?: (rs: PickResult[]) => void;
-  /** Sessions whose rosters the "attendees" kind should load. */
-  sessionIds?: number[];
-  compact?: boolean;
-  autoFocus?: boolean;
+  primary: string;
+  secondary?: string;
+  right?: string;
+  checked?: boolean;
+  onClick: () => void;
 }) {
-  const [q, setQ] = useState("");
-  const [rows, setRows] = useState<unknown[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [chosen, setChosen] = useState<Record<string, PickResult>>({});
-
-  const multi = kind === "sessions" || kind === "attendees";
-  const sessionKey = sessionIds.join(",");
-
-  useEffect(() => {
-    if (kind === "studio" || kind === "membership") return;
-    setLoading(true);
-    const resource =
-      kind === "member"
-        ? "members"
-        : kind === "trainer"
-          ? "directory"
-          : kind === "private-session"
-            ? "private-sessions"
-            : kind === "attendees"
-              ? "attendees"
-              : "sessions";
-    // Attendees are keyed by the sessions already on the ticket, not by a
-    // search term — there is nothing to type until sessions are chosen.
-    const url =
-      resource === "attendees"
-        ? `/api/momence?resource=attendees&sessionIds=${encodeURIComponent(sessionKey)}`
-        : `/api/momence?resource=${resource}&q=${encodeURIComponent(q)}&days=${kind === "private-session" ? 150 : 14}`;
-    if (resource === "attendees" && !sessionKey) {
-      setRows([]);
-      setLoading(false);
-      return;
-    }
-    const t = setTimeout(() => {
-      apiFetch<Record<string, unknown[]>>(url)
-        .then((d) => {
-          setRows(d.members ?? d.sessions ?? d.trainers ?? d.attendees ?? []);
-        })
-        .catch(() => setRows([]))
-        .finally(() => setLoading(false));
-    }, 240);
-    return () => clearTimeout(t);
-  }, [kind, q, sessionKey]);
-
-  const toggle = (key: string, r: PickResult) =>
-    setChosen((prev) => {
-      const next = { ...prev };
-      if (next[key]) delete next[key];
-      else next[key] = r;
-      return next;
-    });
-
-  const staticRows = useMemo(() => {
-    if (kind === "studio") {
-      return studios
-        .filter((s) => !q || `${s.name} ${s.city}`.toLowerCase().includes(q.toLowerCase()))
-        .map((s) => ({ id: s.id, primary: s.name, secondary: s.city, value: `studio:${s.id}:${s.name}, ${s.city}` }));
-    }
-    if (kind === "membership") {
-      return MEMBERSHIPS.filter((m) => !q || m.toLowerCase().includes(q.toLowerCase())).map((m, i) => ({
-        id: i,
-        primary: m,
-        secondary: m.split(" ")[0],
-        value: `membership:${m}`,
-      }));
-    }
-    return null;
-  }, [kind, studios, q]);
-
-  const Row = ({
-    primary,
-    secondary,
-    right,
-    checked,
-    onClick,
-  }: {
-    primary: string;
-    secondary?: string;
-    right?: string;
-    checked?: boolean;
-    onClick: () => void;
-  }) => (
+  return (
     <button
       onClick={onClick}
       aria-pressed={checked}
@@ -176,6 +91,101 @@ export default function MomencePicker({
       {right && <span className="shrink-0 text-[10px] tabular txt-3">{right}</span>}
     </button>
   );
+}
+
+export default function MomencePicker({
+  kind,
+  studios = [],
+  onPick,
+  onConfirm,
+  sessionIds = [],
+  compact = false,
+  autoFocus = true,
+}: {
+  kind: PickerKind;
+  studios?: Studio[];
+  onPick: (r: PickResult) => void;
+  /** Multi-select kinds report the whole selection at once. */
+  onConfirm?: (rs: PickResult[]) => void;
+  /** Sessions whose rosters the "attendees" kind should load. */
+  sessionIds?: number[];
+  compact?: boolean;
+  autoFocus?: boolean;
+}) {
+  const [q, setQ] = useState("");
+  const [rows, setRows] = useState<unknown[]>([]);
+  // `loading` is derived from which request the rows belong to: keying it to the
+  // query means no effect has to flip a flag synchronously, and a keystroke
+  // shows the spinner from its first frame instead of a flash of stale rows.
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<Record<string, PickResult>>({});
+
+  const multi = kind === "sessions" || kind === "attendees";
+  const sessionKey = sessionIds.join(",");
+  const noAttendeeSessions = kind === "attendees" && !sessionKey;
+
+  useEffect(() => {
+    if (kind === "studio" || kind === "membership") return;
+    const resource =
+      kind === "member"
+        ? "members"
+        : kind === "trainer"
+          ? "directory"
+          : kind === "private-session"
+            ? "private-sessions"
+            : kind === "attendees"
+              ? "attendees"
+              : "sessions";
+    // Attendees are keyed by the sessions already on the ticket, not by a
+    // search term — there is nothing to type until sessions are chosen.
+    const url =
+      resource === "attendees"
+        ? `/api/momence?resource=attendees&sessionIds=${encodeURIComponent(sessionKey)}`
+        : `/api/momence?resource=${resource}&q=${encodeURIComponent(q)}&days=${kind === "private-session" ? 150 : 14}`;
+    const requestKey = `${kind}|${q}|${sessionKey}`;
+    // Nothing to ask for until sessions are chosen; the render path treats that
+    // as settled, so the effect writes no state of its own.
+    if (noAttendeeSessions) return;
+    const t = setTimeout(() => {
+      apiFetch<Record<string, unknown[]>>(url)
+        .then((d) => {
+          setRows(d.members ?? d.sessions ?? d.trainers ?? d.attendees ?? []);
+        })
+        .catch(() => setRows([]))
+        .finally(() => setSettledKey(requestKey));
+    }, 240);
+    return () => clearTimeout(t);
+  }, [kind, q, sessionKey, noAttendeeSessions]);
+
+  const toggle = (key: string, r: PickResult) =>
+    setChosen((prev) => {
+      const next = { ...prev };
+      if (next[key]) delete next[key];
+      else next[key] = r;
+      return next;
+    });
+
+
+  const loading = !noAttendeeSessions && settledKey !== `${kind}|${q}|${sessionKey}`;
+  /** Rows only count for the request they came back for. */
+  const visibleRows = noAttendeeSessions ? [] : rows;
+
+  const staticRows = useMemo(() => {
+    if (kind === "studio") {
+      return studios
+        .filter((s) => !q || `${s.name} ${s.city}`.toLowerCase().includes(q.toLowerCase()))
+        .map((s) => ({ id: s.id, primary: s.name, secondary: s.city, value: `ans:studio|${s.name}, ${s.city}` }));
+    }
+    if (kind === "membership") {
+      return MEMBERSHIPS.filter((m) => !q || m.toLowerCase().includes(q.toLowerCase())).map((m, i) => ({
+        id: i,
+        primary: m,
+        secondary: m.split(" ")[0],
+        value: `ans:membershipRef|${m}`,
+      }));
+    }
+    return null;
+  }, [kind, studios, q]);
 
   const placeholder =
     kind === "member"
@@ -214,7 +224,7 @@ export default function MomencePicker({
         ))}
 
         {!staticRows && kind === "member" &&
-          (rows as MemberRow[]).map((m) => (
+          (visibleRows as MemberRow[]).map((m) => (
             <Row
               key={m.id}
               primary={m.name || m.email || `Member ${m.id}`}
@@ -222,7 +232,7 @@ export default function MomencePicker({
               right={`${m.visits} visits`}
               onClick={() =>
                 onPick({
-                  value: `member:${m.id}:${m.name}`,
+                  value: `ans:member|${m.name}`,
                   label: m.name,
                   meta: { memberId: m.id, email: m.email, phone: m.phone, visits: m.visits },
                 })
@@ -231,15 +241,15 @@ export default function MomencePicker({
           ))}
 
         {!staticRows && kind === "trainer" &&
-          (rows as { id: number; name: string }[])
+          (visibleRows as { id: number; name: string }[])
             .filter((t) => !q || t.name.toLowerCase().includes(q.toLowerCase()))
             .slice(0, 40)
             .map((t) => (
-              <Row key={t.id} primary={t.name} onClick={() => onPick({ value: `trainer:${t.name}`, label: t.name, meta: { teacherId: t.id } })} />
+              <Row key={t.id} primary={t.name} onClick={() => onPick({ value: `ans:trainer|${t.name}`, label: t.name, meta: { teacherId: t.id } })} />
             ))}
 
         {!staticRows && (kind === "session" || kind === "sessions" || kind === "private-session") &&
-          (rows as SessionRow[]).map((s) => (
+          (visibleRows as SessionRow[]).map((s) => (
             <Row
               key={`${s.id}-${s.startsAt}`}
               primary={s.name}
@@ -248,7 +258,7 @@ export default function MomencePicker({
               checked={multi ? Boolean(chosen[`s${s.id}`]) : undefined}
               onClick={() => {
                 const r: PickResult = {
-                  value: `session:${s.id}:${s.name}|${fmt(s.startsAt)}|${s.teacher ?? ""}`,
+                  value: `ans:classInfo|${s.name}|${fmt(s.startsAt)}|${s.teacher ?? ""}`,
                   label: `${s.name} · ${fmt(s.startsAt)}`,
                   meta: {
                     sessionId: s.id,
@@ -267,7 +277,7 @@ export default function MomencePicker({
           ))}
 
         {!staticRows && kind === "attendees" &&
-          (rows as AttendeeRow[])
+          (visibleRows as AttendeeRow[])
             .filter((a) => !q || `${a.name} ${a.email ?? ""}`.toLowerCase().includes(q.toLowerCase()))
             .map((a) => (
               <Row
@@ -277,7 +287,7 @@ export default function MomencePicker({
                 checked={Boolean(chosen[`a${a.sessionId}-${a.memberId}`])}
                 onClick={() =>
                   toggle(`a${a.sessionId}-${a.memberId}`, {
-                    value: `member:${a.memberId}:${a.name}`,
+                    value: `ans:member|${a.name}`,
                     label: a.name || `Member ${a.memberId}`,
                     meta: { memberId: a.memberId, email: a.email, phone: a.phone, sessionId: a.sessionId },
                   })
@@ -285,7 +295,7 @@ export default function MomencePicker({
               />
             ))}
 
-        {!loading && !staticRows && rows.length === 0 && (
+        {!loading && !staticRows && visibleRows.length === 0 && (
           <div className="px-2 py-3 text-[11.5px] txt-3">
             No matches{q ? ` for "${q}"` : ""}. Type and press enter to use free text.
           </div>
@@ -294,7 +304,7 @@ export default function MomencePicker({
         {q.trim() && (kind === "member" || kind === "trainer") && (
           <Row
             primary={`Use "${q.trim()}" as typed`}
-            onClick={() => onPick({ value: `${kind}:${q.trim()}`, label: q.trim() })}
+            onClick={() => onPick({ value: `ans:${kind}|${q.trim()}`, label: q.trim() })}
           />
         )}
       </div>
